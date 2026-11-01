@@ -18,11 +18,12 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import signal
 import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, assurance, engines, options, pipeline, registry
+from . import __version__, assurance, cancel, engines, options, pipeline, registry
 from .assurance import Report
 from .detect import detect, mislabelled, normalize
 from .errors import ConversionError, EngineMissingError
@@ -74,6 +75,10 @@ def cmd_engines(args) -> int:
     for eng, path in engines.status():
         state = path if path else f"not installed  (convertall engines --install {eng.key}, {eng.size})"
         print(f"  {eng.name:<12} {state}")
+    import packport
+    archives = ("compiled decoders (packport-native)" if packport.accelerated()
+                else "Python decoders (packport-native isn't installed: archives unpack more slowly)")
+    print(f"  {'packport':<12} {archives}")
     return 0
 
 
@@ -152,6 +157,29 @@ def cmd_plan(paths: list[Path], target: str, settings: dict, as_json: bool) -> i
 
 def cmd_convert(paths: list[Path], target: str | None, extract: bool, out: str | None, yes: bool,
                 settings: dict | None = None, as_json: bool = False) -> int:
+    """Ctrl+C stops the conversion as Cancel does in the window: at its next safe point, cleaned up
+    (and the files after it aren't started). A second Ctrl+C stops at once."""
+    token = cancel.Token()
+
+    def stop(_signum, _frame):
+        if token.cancelled:
+            raise KeyboardInterrupt
+        print("Stopping... (Ctrl+C again to stop at once)", file=sys.stderr, flush=True)
+        token.cancel()
+
+    previous = signal.signal(signal.SIGINT, stop)
+    try:
+        with cancel.using(token):
+            return _convert_all(paths, target, extract, out, yes, settings, as_json)
+    except cancel.Cancelled:
+        print("Stopped: what was being converted wasn't saved", file=sys.stderr)
+        return 130
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _convert_all(paths: list[Path], target: str | None, extract: bool, out: str | None, yes: bool,
+                 settings: dict | None, as_json: bool) -> int:
     failures = 0
     info = sys.stderr if as_json else sys.stdout  # with --json, stdout holds only the reports
     for i, path in enumerate(paths, 1):
@@ -173,6 +201,8 @@ def cmd_convert(paths: list[Path], target: str | None, extract: bool, out: str |
                     for note in notes:
                         print(f"{prefix}  {note}")
                 break
+            except cancel.Cancelled:
+                raise
             except EngineMissingError as exc:
                 if attempt == 0 and _ask_install(exc.engines, yes, info):
                     continue

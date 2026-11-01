@@ -63,8 +63,7 @@ def book_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     _write(_read(src, src_fmt), dst, dst_fmt)
 
 
-@converter(inputs=COMICS - {"cbr"}, outputs=BOOKS_OUT - {"txt", "txtz", "tcr", "pml", "pmlz"}, terminal=True)
-@converter(inputs={"cbr"}, outputs=BOOKS_OUT - {"txt", "txtz", "tcr", "pml", "pmlz"}, engine="7zip", terminal=True)
+@converter(inputs=COMICS, outputs=BOOKS_OUT - {"txt", "txtz", "tcr", "pml", "pmlz"}, terminal=True)
 def comic_to_book(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     """Each page becomes a page of a fixed-layout book. The archive is unpacked first, so every
     kind of comic works; pages in formats readers don't take (HEIC, TIFF, AVIF) become JPG or PNG."""

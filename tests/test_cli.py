@@ -1,6 +1,6 @@
 import json
 
-from convertall import engines
+from convertall import cli, engines
 from convertall.cli import main
 from convertall.errors import ConversionError
 
@@ -127,3 +127,39 @@ def test_a_damaged_archive_extracts_to_a_message(tmp_path, monkeypatch):
         assert "Couldn't extract a.zip" in str(exc)
     else:
         raise AssertionError("no error")
+
+
+def test_engines_says_which_archive_decoders_are_in_use(monkeypatch, capsys):
+    import packport
+    for compiled, words in ((True, "compiled decoders"), (False, "Python decoders")):
+        monkeypatch.setattr(packport, "accelerated", lambda c=compiled: c)
+        assert main(["engines"]) == 0
+        line = next(ln for ln in capsys.readouterr().out.splitlines() if ln.strip().startswith("packport"))
+        assert words in line
+
+
+def test_ctrl_c_stops_the_conversion_cleanly(tmp_path, monkeypatch, capsys):
+    """Ctrl+C asks the running conversion to stop (as Cancel in the window does): it stops at its
+    next safe point, cleans up, and the files after it aren't started. Exit code 130. (It used to
+    end the program wherever it was, which could leave a half-written temporary folder.)"""
+    import signal
+
+    from convertall import cancel
+    started = []
+
+    def slow_convert(path, target, out, report=None, options=None):
+        started.append(path.name)
+        signal.raise_signal(signal.SIGINT)  # the user presses Ctrl+C part-way through
+        cancel.check()  # the conversion's next safe point
+        raise AssertionError("should have stopped")
+
+    monkeypatch.setattr(cli.pipeline, "convert", slow_convert)
+    files = []
+    for name in ("a.png", "b.png"):
+        (tmp_path / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+        files.append(tmp_path / name)
+    before = signal.getsignal(signal.SIGINT)
+    assert cli.cmd_convert(files, "jpg", False, None, False) == 130
+    assert started == ["a.png"]
+    assert "Stopped" in capsys.readouterr().err
+    assert signal.getsignal(signal.SIGINT) is before  # put back afterwards

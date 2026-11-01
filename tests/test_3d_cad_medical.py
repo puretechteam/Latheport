@@ -251,3 +251,59 @@ def test_rigged_models_convert_bent_where_their_skeleton_holds_them(tmp_path, fm
     if fmt in ("stl", "3mf"):  # printing formats are Z up: y comes back as z
         lo, hi = np.array([lo[0], lo[2], -hi[1]]), np.array([hi[0], hi[2], -lo[1]])
     assert np.allclose(lo, (-0.5, 3.5, -0.5), atol=1e-4) and np.allclose(hi, (0.5, 4.5, 0.5), atol=1e-4)
+
+
+def _fake_gmsh_wheel(tmp_path):
+    """A wheel laid out as gmsh's is: gmsh.py at the top, the DLL under .data, license in share."""
+    import hashlib
+    import zipfile
+    wheel = tmp_path / "gmsh-4.15.2-py2.py3-none-win_amd64.whl"
+    with zipfile.ZipFile(wheel, "w") as z:
+        z.writestr("gmsh.py", "MARK = 'downloaded gmsh'\n")
+        z.writestr("gmsh-4.15.2.data/data/Lib/gmsh-4.15.dll", b"MZ" + bytes(100))
+        z.writestr("gmsh-4.15.2.data/data/share/doc/gmsh/LICENSE.txt", "GPL")
+        z.writestr("gmsh-4.15.2.data/data/share/doc/gmsh/examples/api/t1.py", "not wanted")
+    return wheel.as_uri(), hashlib.sha256(wheel.read_bytes()).hexdigest()
+
+
+def test_gmsh_is_downloaded_the_first_time_a_cad_part_needs_it(tmp_path, monkeypatch):
+    """The Windows build leaves gmsh out (85 MB): CAD routes say they need it, and installing it
+    downloads the pinned wheel, checks its SHA-256 and keeps only gmsh.py, the DLL and the license."""
+    import sys
+
+    from convertall import engines, registry
+    url, sha = _fake_gmsh_wheel(tmp_path)
+    monkeypatch.setattr(engines, "ENGINE_HOME", str(tmp_path / "engines"))
+    monkeypatch.setattr(engines, "GMSH_WHEEL", (url, sha))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)  # as in the built app: no pip gmsh to fall back on
+    monkeypatch.delitem(sys.modules, "gmsh", raising=False)
+    engines.refresh()
+    try:
+        assert engines.find("gmsh") is None
+        assert registry.targets("step")["stl"].missing_engines == ["gmsh"]
+        engines.DOWNLOADERS["gmsh"](None)  # what install("gmsh") runs (into tmp_path: nothing on the machine)
+        engines.refresh()
+        assert engines.find("gmsh")
+        kept = sorted(p.name for p in (tmp_path / "engines" / "gmsh").iterdir())
+        assert kept == ["LICENSE.txt", "gmsh-4.15.dll", "gmsh.py"]
+        assert engines.load_gmsh().MARK == "downloaded gmsh"
+    finally:
+        sys.modules.pop("gmsh", None)
+        engines.refresh()
+
+
+def test_a_gmsh_download_that_doesnt_match_its_checksum_is_refused(tmp_path, monkeypatch):
+    import sys
+
+    from convertall import engines
+    url, _ = _fake_gmsh_wheel(tmp_path)
+    monkeypatch.setattr(engines, "ENGINE_HOME", str(tmp_path / "engines"))
+    monkeypatch.setattr(engines, "GMSH_WHEEL", (url, "0" * 64))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    engines.refresh()
+    try:
+        with pytest.raises(ConversionError, match="checksum"):
+            engines.DOWNLOADERS["gmsh"](None)
+        assert not (tmp_path / "engines" / "gmsh").exists()
+    finally:
+        engines.refresh()

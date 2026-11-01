@@ -3,15 +3,18 @@
 The window's job holds a Token and runs its conversions inside using(token). Steps call check()
 where stopping is safe (between files, between route steps, between chunks of an extraction);
 engines.run() hands every program it starts to track(), so cancel() ends them at once instead of
-waiting for them to finish."""
+waiting for them to finish. The token also counts what an extraction has written (expect() and
+moved()), for the window to show how far a big one has got."""
 
 from __future__ import annotations
 
 import contextlib
 import contextvars
+import os
 import subprocess
 import sys
 import threading
+import time
 
 from .errors import ConversionError
 
@@ -28,6 +31,23 @@ class Token:
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._procs: set[subprocess.Popen] = set()
+        self.listener = None  # listener(done, total): bytes written so far, of what was expected
+        self.expected = self.done = 0
+        self._told = -1.0
+
+    def expect(self, total: int) -> None:
+        """The bytes the file being worked on will write (an archive's declared size)."""
+        self.expected, self.done, self._told = total, 0, -1.0
+
+    def moved(self, n: int) -> None:
+        """n more bytes written; the listener hears at most four times a second, and at the end."""
+        self.done += n
+        if self.listener is None:
+            return
+        now = time.monotonic()
+        if now - self._told >= 0.25 or self.done >= self.expected:
+            self._told = now
+            self.listener(self.done, self.expected)
 
     @property
     def cancelled(self) -> bool:
@@ -63,7 +83,9 @@ def _kill(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True,
+        # by its full path: a "taskkill.exe" earlier on PATH would be run instead
+        taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+        subprocess.run([taskkill, "/F", "/T", "/PID", str(proc.pid)], capture_output=True,
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False)
     if proc.poll() is None:
         proc.kill()
@@ -91,6 +113,20 @@ def check() -> None:
     token = _current.get()
     if token is not None:
         token.check()
+
+
+def expect(total: int) -> None:
+    """Tell the running conversion's token how many bytes this file will write."""
+    token = _current.get()
+    if token is not None:
+        token.expect(total)
+
+
+def moved(n: int) -> None:
+    """n more bytes written by the running conversion."""
+    token = _current.get()
+    if token is not None:
+        token.moved(n)
 
 
 @contextlib.contextmanager

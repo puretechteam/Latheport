@@ -1,5 +1,5 @@
-"""External conversion engines: find them, run them, install them with winget (or, for the one
-engine winget doesn't carry, download its official release)."""
+"""External conversion engines: find them, run them, install them with winget (or, for the ones
+winget doesn't carry, download their official release: Ghostscript, and gmsh for CAD parts)."""
 
 from __future__ import annotations
 
@@ -44,10 +44,6 @@ ENGINES: dict[str, Engine] = {e.key: e for e in [
         r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\*\bin\ffmpeg.exe",
         r"%ProgramFiles%\ffmpeg\bin\ffmpeg.exe",
     )),
-    Engine("7zip", "7-Zip", "7z", "7zip.7zip", "~6 MB", (
-        r"%ProgramFiles%\7-Zip\7z.exe",
-        r"%ProgramFiles(x86)%\7-Zip\7z.exe",
-    )),
     Engine("libreoffice", "LibreOffice", "soffice", "TheDocumentFoundation.LibreOffice", "~350 MB", (
         r"%ProgramFiles%\LibreOffice\program\soffice.exe",
         r"%ProgramFiles(x86)%\LibreOffice\program\soffice.exe",
@@ -67,6 +63,7 @@ ENGINES: dict[str, Engine] = {e.key: e for e in [
         os.path.join(ENGINE_HOME, "ghostscript", "bin", "gswin64c.exe"),
         r"%ProgramFiles%\gs\gs*\bin\gswin64c.exe",
     )),
+    Engine("gmsh", "gmsh", "gmsh", "", "~90 MB"),  # a Python module and its DLL: see find_gmsh
     Engine("winrar", "WinRAR", "rar", "", "", (
         r"%ProgramFiles%\WinRAR\Rar.exe",
         r"%ProgramFiles(x86)%\WinRAR\Rar.exe",
@@ -112,6 +109,9 @@ def which(exe: str) -> str | None:
 
 def find(key: str) -> str | None:
     if key in _cache:
+        return _cache[key]
+    if key == "gmsh":
+        _cache[key] = find_gmsh()
         return _cache[key]
     eng = ENGINES[key]
     found = which(eng.exe)
@@ -181,8 +181,6 @@ def _download_ghostscript(log: Callable[[str], None] | None) -> None:
     gswin64c.exe and the DLL, which has fonts and startup files built in)."""
     import urllib.request
     url, sha256 = _latest_ghostscript()
-    if not available("7zip"):
-        install("7zip", log)
     with tempfile.TemporaryDirectory(prefix="convertall-gs-") as tmp:
         setup = os.path.join(tmp, "gs.exe")
         if log:
@@ -196,11 +194,118 @@ def _download_ghostscript(log: Callable[[str], None] | None) -> None:
             raise ConversionError("The Ghostscript download didn't match its published checksum")
         dest = os.path.join(ENGINE_HOME, "ghostscript")
         shutil.rmtree(dest, ignore_errors=True)
-        run([require("7zip"), "x", "-y", "-bd", f"-o{dest}", setup, "bin"])
+        _unpack_folder(setup, dest, "bin")
+
+
+def _unpack_folder(setup: str, dest: str, folder: str) -> None:
+    """One folder of an installer (an NSIS one: Ghostscript's), read straight out of it by
+    packport, without running it."""
+    import packport
+
+    from .safety import safe_name
+    count = 0
+    try:
+        with packport.open(setup) as archive:
+            for item, stream in archive.files():
+                rel = safe_name(item.name)
+                if not rel or not rel.startswith(folder + "/"):
+                    continue
+                target = os.path.join(dest, *rel.split("/"))
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "xb") as out:
+                    shutil.copyfileobj(stream, out, 1 << 20)
+                count += 1
+    except packport.PackportError as exc:
+        raise ConversionError(f"Couldn't unpack {os.path.basename(setup)}: {exc}") from None
+    if not count:
+        raise ConversionError(f"{os.path.basename(setup)} has no {folder} folder")
+
+
+# ---- gmsh (STEP, IGES and BREP to a mesh): a Python module and its 85 MB DLL, downloaded the
+# first time a CAD part is converted rather than shipped with every copy of ConvertAll. The
+# wheel on PyPI is pinned by version and SHA-256; only gmsh.py, the DLL and gmsh's license and
+# credits are taken out of it.
+
+GMSH_WHEEL = (("https://files.pythonhosted.org/packages/78/e9/63c763c0d75544680800651d5ea8c7c3203ae4b5e054706f19a54021a7fb/"
+               "gmsh-4.15.2-py2.py3-none-win_amd64.whl"),
+              "7b36083bb410fa27c5d0e052929d1a9844a5b09169d66017b72b41aabd49d711")
+GMSH_KEEP = ("gmsh.py", "LICENSE.txt", "CREDITS.txt")
+
+
+def find_gmsh() -> str | None:
+    """gmsh.py: the one ConvertAll downloaded, or (when ConvertAll runs from source) the pip
+    package's. The frozen app has no gmsh of its own."""
+    folder = os.path.join(ENGINE_HOME, "gmsh")
+    if os.path.isfile(os.path.join(folder, "gmsh.py")) and glob.glob(os.path.join(folder, "gmsh-*.dll")):
+        return os.path.join(folder, "gmsh.py")
+    if getattr(sys, "frozen", False):
+        return None
+    import importlib.util
+    try:
+        spec = importlib.util.find_spec("gmsh")
+    except (ImportError, ValueError):
+        return None
+    return spec.origin if spec and spec.origin else None
+
+
+def load_gmsh():
+    """The gmsh module, imported from where find_gmsh() says it is."""
+    path = find("gmsh")
+    if not path:
+        from .errors import EngineMissingError
+        raise EngineMissingError(["gmsh"])
+    if "gmsh" in sys.modules:
+        return sys.modules["gmsh"]
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gmsh", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["gmsh"] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules["gmsh"]
+        raise
+    return module
+
+
+def _download_gmsh(log: Callable[[str], None] | None) -> None:
+    import urllib.request
+
+    import packport
+    url, sha256 = GMSH_WHEEL
+    with tempfile.TemporaryDirectory(prefix="convertall-gmsh-") as tmp:
+        wheel = os.path.join(tmp, url.rsplit("/", 1)[-1])
+        if log:
+            log(f"Downloading {url.rsplit('/', 1)[-1]}")
+        h = hashlib.sha256()
+        with urllib.request.urlopen(url, timeout=60) as r, open(wheel, "wb") as f:
+            while chunk := r.read(1 << 20):
+                h.update(chunk)
+                f.write(chunk)
+        if h.hexdigest() != sha256:
+            raise ConversionError("The gmsh download didn't match its published checksum")
+        dest = os.path.join(ENGINE_HOME, "gmsh")
+        shutil.rmtree(dest, ignore_errors=True)
+        os.makedirs(dest)
+        found = set()
+        try:
+            with packport.open(wheel) as archive:
+                for item, stream in archive.files():
+                    leaf = item.name.rsplit("/", 1)[-1]
+                    if leaf in GMSH_KEEP or (leaf.startswith("gmsh-") and leaf.endswith(".dll")):
+                        with open(os.path.join(dest, leaf), "xb") as out:
+                            shutil.copyfileobj(stream, out, 1 << 20)
+                        found.add("dll" if leaf.endswith(".dll") else leaf)
+        except packport.PackportError as exc:
+            raise ConversionError(f"Couldn't unpack the gmsh download: {exc}") from None
+        if not {"gmsh.py", "dll"} <= found:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise ConversionError("The gmsh download has no gmsh.py or no DLL")
 
 
 DOWNLOADERS: dict[str, Callable[[Callable[[str], None] | None], None]] = {
     "ghostscript": _download_ghostscript,
+    "gmsh": _download_gmsh,
 }
 
 

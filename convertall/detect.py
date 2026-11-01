@@ -102,10 +102,51 @@ _SIGNATURES = (
     (b"\xc5\xd0\xd3\xc6", "eps"), (b"AT&TFORM", "djvu"), (b"\x04\x22\x4d\x18", "lz4"), (b"\x1f\x9d", "z"),
     (b"070701", "cpio"), (b"070702", "cpio"), (b"070707", "cpio"), (b"xar!", "xar"), (b"KDMV", "vmdk"),
     (b"QFI\xfb", "qcow2"), (b"conectix", "vhd"), (b"vhdxfile", "vhdx"), (b"ITSF", "chm"),
-    (b"<<< Oracle VM VirtualBox Disk Image >>>", "vdi"), (b"!<arch>\n", "ar"),
+    (b"<<< Oracle VM VirtualBox Disk Image >>>", "vdi"), (b"!<arch>\n", "ar"), (b"hsqs", "squashfs"),
 )
 # Text formats recognised by what they start with (after any BOM and blank space)
 _TEXT_STARTS = ((b"BEGIN:VCARD", "vcf"), (b"BEGIN:VCALENDAR", "ics"), (b"WEBVTT", "vtt"))
+
+
+MSI_CLSIDS = {"000C1084-0000-0000-C000-000000000046": "msi", "000C1086-0000-0000-C000-000000000046": "msp"}
+
+
+def _subtype(path: Path, fmt: str, head: bytes) -> str:
+    """A more exact kind for a signature several formats share: a deb is an ar archive whose
+    first member is debian-binary, a macOS pkg is a xar archive with a Payload."""
+    if fmt == "ar" and head[8:24].startswith(b"debian-binary"):
+        return "deb"
+    if fmt == "xar":
+        import packport
+        try:
+            if packport.detect(path) == "pkg":
+                return "pkg"
+        except Exception:  # noqa: BLE001, S110 - damaged: it's still a xar archive
+            pass
+    return fmt
+
+
+def _deeper(path: Path, head: bytes) -> str | None:
+    """Signatures that aren't at the start: APFS at 32, HFS+ at 1024, UDF at 32 KB, and the class
+    of an OLE file (Windows Installer packages and patches, rather than Word documents)."""
+    if head[32:36] == b"NXSB":
+        return "apfs"
+    with path.open("rb") as f:
+        f.seek(1024)
+        if f.read(2) in (b"H+", b"HX"):
+            return "hfs"
+        f.seek(16 * 2048)
+        vrs = f.read(6 * 2048)
+    if vrs[1:6] == b"BEA01" and any(vrs[k * 2048 + 1:k * 2048 + 6] in (b"NSR02", b"NSR03") for k in range(6)):
+        return "udf"
+    if head.startswith(bytes.fromhex("d0cf11e0a1b11ae1")):
+        import olefile
+        try:
+            with olefile.OleFileIO(str(path)) as ole:
+                return MSI_CLSIDS.get((ole.root.clsid or "").upper())
+        except Exception:  # noqa: BLE001 - not an OLE file after all
+            return None
+    return None
 
 
 def _sniff(path: Path) -> str | None:
@@ -120,7 +161,10 @@ def _sniff(path: Path) -> str | None:
             return "eps" if b"EPSF" in head.split(b"\n", 1)[0] else "ps"
         for magic, fmt in _SIGNATURES:
             if head.startswith(magic):
-                return fmt
+                return _subtype(path, fmt, head)
+        deeper = _deeper(path, head)
+        if deeper:
+            return deeper
         text = head.lstrip(b"\xef\xbb\xbf \t\r\n")
         for start, fmt in _TEXT_STARTS:
             if text.upper().startswith(start):

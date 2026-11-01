@@ -4,6 +4,7 @@ on this machine can create that format (camera RAW, Apple iWork, Visio...)."""
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import sqlite3
 import struct
@@ -64,6 +65,34 @@ def write_ar(path: Path, members: dict[str, bytes]) -> None:
         if len(data) % 2:
             out += b"\n"
     path.write_bytes(out)
+
+
+def _rpm_header(tags: list[tuple[int, int, bytes, int]]) -> bytes:
+    index, store = b"", b""
+    for tag, kind, data, count in tags:
+        index += struct.pack(">IIII", tag, kind, len(store), count)
+        store += data
+    return b"\x8e\xad\xe8\x01" + bytes(4) + struct.pack(">II", len(tags), len(store)) + index + store
+
+
+def write_rpm(path: Path, files: dict[str, bytes | None]) -> None:
+    """An RPM put together from the format's description: lead, signature, header, and a
+    gzip-compressed newc CPIO payload (None: a folder)."""
+    import gzip
+
+    import packport
+    buf = io.BytesIO()
+    cpio = packport.CpioWriter(buf)
+    for name, data in files.items():
+        cpio.add(name, data, is_dir=data is None)
+    cpio.close()
+    packed = gzip.compress(buf.getvalue(), mtime=0)
+    lead = b"\xed\xab\xee\xdb\x03\x00" + struct.pack(">hh", 0, 1) + b"demo-1.0-1".ljust(66, b"\0") + \
+        struct.pack(">hh", 1, 5) + bytes(16)
+    head = _rpm_header([(1000, 6, b"demo\0", 1), (1124, 6, b"cpio\0", 1), (1125, 6, b"gzip\0", 1)])
+    sig = _rpm_header([(1000, 4, struct.pack(">I", len(head) + len(packed)), 1)])  # SIZE: header and payload
+    sig += bytes(-len(sig) % 8)
+    path.write_bytes(lead + sig + head + packed)
 
 
 def _tar_gz(files: dict[str, bytes]) -> bytes:
@@ -907,8 +936,9 @@ class Samples:
                          "control.tar.gz": _tar_gz({"./control": b"Package: sample\nVersion: 1.0\n"}),
                          "data.tar.gz": _tar_gz({"./usr/share/doc/sample/readme": TEXT.encode()})})
             return p
-        if fmt == "wim" and engines.available("7zip"):
-            engines.run([engines.find("7zip"), "a", "-twim", str(p), str(self("folder"))])
+        if fmt == "wim":
+            import packport
+            packport.write_wim(p, [self("folder")])
             return p
         if fmt in archives.ZIP_BASED:  # apps and packages are zip files under another name
             shutil.copyfile(self("zip"), p)
@@ -916,15 +946,88 @@ class Samples:
         if fmt == "ar":
             write_ar(p, {"notes.txt": TEXT.encode(), "readme": b"second member\n"})
             return p
-        if fmt == "img":  # a raw disc image: 7-Zip finds the ISO 9660 file system inside
+        if fmt == "img":  # a raw disc image: packport finds the ISO 9660 file system inside
             shutil.copyfile(self("iso"), p)
             return p
-        if fmt == "001" and engines.available("7zip"):  # a 7z split into 1 KB volumes
-            vol = self.dir / "_split" / "sample.7z"
-            vol.parent.mkdir(exist_ok=True)
-            engines.run([engines.find("7zip"), "a", "-v1k", "-mx0", str(vol), str(self("folder"))])
-            for part in vol.parent.iterdir():  # sample.7z.001, .002... -> sample.001, .002...
-                shutil.move(str(part), str(self.dir / f"sample.{part.suffix[1:]}"))
+        if fmt == "001":  # a ZIP cut into 1 KB volumes, as split programs make them
+            data = self("zip").read_bytes()
+            for k in range(0, len(data), 1024):
+                (self.dir / f"sample.{k // 1024 + 1:03d}").write_bytes(data[k:k + 1024])
+            return p
+        return self._archive(fmt, p)
+
+    def _archive(self, fmt: str, p: Path) -> Path | None:
+        """Archives and disk images ConvertAll reads but doesn't write, from data/archives:
+        packport's own test files, libarchive's (COPYING-libarchive.txt) and dfvfs's disk images
+        (LICENSE-dfvfs.txt), the disk images kept .Z-compressed. xar, pkg and MSI are made here
+        with Windows' own tar.exe and Windows Installer."""
+        import packport
+        data = Path(__file__).parent / "data" / "archives"
+        copies = {"lzh": "sample.lzh", "arj": "sample.arj", "squashfs": "sample.squashfs", "cab": "sample.cab"}
+        packed = {"udf": "sample.udf.Z", "vhd": "ext2.vhd.Z", "vhdx": "ext2.vhdx.Z", "vmdk": "ext2.vmdk.Z",
+                  "qcow2": "ext2.qcow2.Z", "dmg": "hfsplus_zlib.dmg.Z", "apfs": "apfs.raw.Z", "hfs": "hfsplus.raw.Z"}
+        if fmt in copies:
+            shutil.copyfile(data / copies[fmt], p)
+            return p
+        if fmt == "rpm":
+            write_rpm(p, {"./usr": None, "./usr/bin": None, "./usr/bin/demo": b"#!/bin/sh\necho demo\n",
+                          "./etc/demo.conf": b"x=1\n"})
+            return p
+        if fmt in packed:
+            p.write_bytes(packport.decompress((data / packed[fmt]).read_bytes()))
+            return p
+        if fmt == "vdi":
+            p.write_bytes(_vdi(packport.decompress((data / "ext2.raw.Z").read_bytes())))
+            return p
+        if fmt == "r00":  # a RAR set named the old way: .rar, then .r00, .r01...
+            folder = self.dir / "_r00"
+            folder.mkdir(exist_ok=True)
+            for k in range(1, 11):
+                ext = "rar" if k == 1 else f"r{k - 2:02d}"
+                shutil.copyfile(data / f"volumes.part{k:02d}.rar", folder / f"volumes.{ext}")
+            return folder / "volumes.r00"
+        tar = shutil.which("tar") if os.name != "nt" else os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                                                                        "System32", "tar.exe")
+        if fmt in ("xar", "pkg") and tar and os.path.exists(tar):
+            import subprocess
+            root = self.dir / f"_{fmt}"
+            root.mkdir(exist_ok=True)
+            if fmt == "xar":
+                (root / "notes.txt").write_text(TEXT)
+                (root / "docs").mkdir(exist_ok=True)
+                (root / "docs" / "readme.txt").write_text("second file\n")
+                names = ["notes.txt", "docs"]
+            else:  # a macOS installer package: its Payload is a gzipped odc CPIO of the files it installs
+                import gzip
+                buf = io.BytesIO()
+                with packport.CpioWriter(buf, "odc") as cpio:
+                    cpio.add("Applications", is_dir=True)
+                    cpio.add("Applications/notes.txt", TEXT.encode())
+                (root / "Payload").write_bytes(gzip.compress(buf.getvalue()))
+                (root / "PackageInfo").write_bytes(b"<pkg-info/>")
+                names = ["Payload", "PackageInfo"]
+            r = subprocess.run([tar, "--format", "xar", "-cf", str(p), "-C", str(root), *names], capture_output=True,
+                               check=False)
+            return p if r.returncode == 0 else None
+        if fmt in ("msi", "msp") and os.name == "nt":  # made by Windows Installer, with a CAB inside
+            import subprocess
+            system = os.path.join(os.environ.get("SystemRoot", "C:/Windows"), "System32")  # PATH may be changed
+            folder = self.dir / "_msi"
+            folder.mkdir(exist_ok=True)
+            (folder / "notes.txt").write_text(TEXT)
+            ddf = folder / "cab.ddf"
+            ddf.write_text("\n".join([".Set CabinetNameTemplate=sample.cab", f".Set DiskDirectoryTemplate={folder}",
+                                      ".Set Cabinet=on", ".Set Compress=on", f'"{folder / "notes.txt"}" notes.txt']) + "\n")
+            subprocess.run([os.path.join(system, "makecab.exe"), "/F", str(ddf)], capture_output=True, cwd=folder,
+                           check=False)
+            msi = folder / "sample.msi"
+            if not msi.exists():
+                subprocess.run([os.path.join(system, "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                                str(Path(__file__).parent / "data" / "make_msi.ps1"), "-Out", str(msi),
+                                "-Cab", str(folder / "sample.cab")], capture_output=True, check=False)
+            if not msi.exists():
+                return None
+            shutil.copyfile(msi, p)  # an .msp patch is the same kind of file
             return p
         return None
 
@@ -945,3 +1048,26 @@ def _soffice_writer(html: Path, p: Path, filt: str) -> Path | None:
         return None
     shutil.move(str(made), str(p))
     return p
+
+
+def _vdi(disk: bytes, block: int = 1 << 20) -> bytes:
+    """A dynamic VirtualBox disk (VDI) holding disk; blocks of zeros left out."""
+    blocks = (len(disk) + block - 1) // block
+    table_at, data_at = 512, 512 + (4 * blocks + 511) // 512 * 512
+    table, body = [], bytearray()
+    for k in range(blocks):
+        chunk = disk[k * block:(k + 1) * block].ljust(block, b"\0")
+        if any(chunk):
+            table.append(len(body) // block)
+            body += chunk
+        else:
+            table.append(0xFFFFFFFF)
+    head = bytearray(512)
+    head[:40] = b"<<< Oracle VM VirtualBox Disk Image >>>\n"
+    struct.pack_into("<IIII", head, 0x40, 0xBEDA107F, 0x00010001, 400, 1)  # signature, version 1.1, dynamic
+    struct.pack_into("<II", head, 0x154, table_at, data_at)
+    struct.pack_into("<I", head, 0x168, 512)  # the sector size
+    struct.pack_into("<QIII", head, 0x170, len(disk), block, 0, blocks)
+    struct.pack_into("<I", head, 0x184, sum(t != 0xFFFFFFFF for t in table))
+    head[0x188:0x198] = uuid.uuid4().bytes
+    return bytes(head) + struct.pack(f"<{blocks}I", *table).ljust(data_at - table_at, b"\0") + bytes(body)

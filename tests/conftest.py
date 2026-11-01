@@ -16,6 +16,30 @@ def no_installs(monkeypatch):
     monkeypatch.setattr(engines, "install", refuse)
 
 
+SEVEN_ZIP_PROGRAMS = {"7z", "7z.exe", "7za", "7za.exe", "7zz", "7zr", "7zr.exe", "7zg.exe", "7zfm.exe"}
+
+
+@pytest.fixture(autouse=True)
+def no_7zip(monkeypatch):
+    """ConvertAll doesn't use 7-Zip. CI machines have it installed, so a leftover call would pass
+    unnoticed: any test that starts a 7-Zip program fails."""
+    import os
+    import subprocess
+    real = subprocess.Popen
+
+    class Guarded(real):
+        def __init__(self, args, *rest, **kwargs):
+            if isinstance(args, str):  # a command line: its first word, quoted or not
+                first = args[1:].split('"', 1)[0] if args.startswith('"') else (args.split() or [""])[0]
+            else:
+                first = str(args[0]) if isinstance(args, (list, tuple)) and args else str(args)
+            name = os.path.basename(first.replace("\\", "/"))
+            if name.lower() in SEVEN_ZIP_PROGRAMS:
+                raise AssertionError(f"a test started 7-Zip ({first})")
+            super().__init__(args, *rest, **kwargs)
+    monkeypatch.setattr(subprocess, "Popen", Guarded)
+
+
 @pytest.fixture
 def without_engine(monkeypatch):
     """Pretend an engine isn't installed: without_engine('ffmpeg')."""

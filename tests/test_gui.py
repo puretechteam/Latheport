@@ -2,6 +2,7 @@
 
 import itertools
 import os
+import time
 
 import pytest
 
@@ -17,7 +18,8 @@ from .samples import Samples
 
 @pytest.fixture(scope="module")
 def app():
-    return QApplication.instance() or QApplication([])
+    from convertall.qtdraw import app as qt_app
+    return qt_app()  # kept for the whole session: a Qt application made twice has no fonts
 
 
 @pytest.fixture
@@ -26,6 +28,10 @@ def window(app, tmp_path, monkeypatch):
     monkeypatch.setattr(gui, "QSettings", lambda *a: settings)  # a new user, every time
     win = gui.Window()
     yield win
+    if win.job is not None:  # a test that failed mid-conversion: stop it without asking, and wait
+        win.confirm_stop = lambda: True
+        win.close()
+        _pump(app, lambda: win.job is None)
     win.close()
     wait_for_previews(app)
 
@@ -694,6 +700,7 @@ def test_keep_converting_leaves_the_job_running_then_cancel_stops_it(app, window
     monkeypatch.setattr(window, "confirm_stop", lambda: False)  # "Keep converting"
     window.close()
     assert window.isVisible() and job.isRunning() and _engine_alive(pid)
+    _pump(app, lambda: False, QApplication.doubleClickInterval() / 1000 + 0.1)  # not part of a double-click
     window.convert_clicked()  # the Convert button is Cancel while it runs
     assert window.convert_btn.text() == "Stopping…" and not window.convert_btn.isEnabled()
     assert _pump(app, lambda: window.job is None)
@@ -724,3 +731,52 @@ def test_cancel_between_files_keeps_the_ones_done(window, tmp_path, monkeypatch)
     assert [p.name for p in window.outputs] == ["in0.pdf"]
     assert window.status.text() == "Stopped"
     assert window.note.text() == "1 saved, 2 not converted"
+
+
+def test_prompt_buttons_show_their_whole_label(app, window):
+    # the stylesheet pads buttons 16 px a side, which a message box doesn't count when it sizes them:
+    # "Stop and close" showed as "top and clos"
+    old, style = app.styleSheet(), app.style().name()
+    app.setStyle("Fusion")  # as the app runs
+    gui.apply_theme(app)
+    try:
+        for box in (window.stop_box(), window.install_box(["ffmpeg"])):
+            box.show()
+            app.processEvents()
+            for b in box.buttons():
+                assert b.width() >= b.fontMetrics().horizontalAdvance(b.text()) + 32, b.text()
+            box.hide()
+    finally:
+        app.setStyleSheet(old)
+        app.setStyle(style)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="checks the engine with tasklist")
+def test_double_clicking_convert_doesnt_cancel_it(app, window, tmp_path, monkeypatch):
+    job, pid, _ = _start_slow_job(app, window, tmp_path, monkeypatch)
+    assert window.convert_btn.property("cancel") is True  # Cancel looks like an ordinary button
+    window.job_started = time.monotonic()  # as if Convert had just been clicked
+    window.convert_clicked()  # the second click of the double-click
+    assert job.isRunning() and not job.cancelled and window.convert_btn.text() == "Cancel"
+    _pump(app, lambda: False, QApplication.doubleClickInterval() / 1000 + 0.1)
+    window.convert_clicked()  # a click of its own: Cancel
+    assert job.cancelled
+    assert _pump(app, lambda: window.job is None)
+    assert not _engine_alive(pid)
+    assert window.convert_btn.text() == "Convert" and window.convert_btn.property("cancel") is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="checks the engine with tasklist")
+def test_stop_and_close_after_the_job_ended_closes_the_window(app, window, tmp_path, monkeypatch):
+    # the conversion ends while "Stop converting and close?" is open; "Stop and close" then left the
+    # window hidden for good, waiting for a job that had gone, and the app never quit
+    from PySide6.QtWidgets import QMessageBox
+    job, pid, _ = _start_slow_job(app, window, tmp_path, monkeypatch)
+
+    def answer():
+        job.cancel()  # the quick way to end it
+        _pump(app, lambda: window.job is None)
+        QApplication.activeModalWidget().button(QMessageBox.Yes).click()
+    QtCore.QTimer.singleShot(200, answer)
+    assert window.close()  # accepted: closed for real
+    assert not window.isVisible() and window.job is None and not _engine_alive(pid)

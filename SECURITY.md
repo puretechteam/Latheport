@@ -5,9 +5,10 @@ ConvertAll opens files people download from anywhere, so a file that makes it re
 ## What ConvertAll does about it
 
 - Archives extract only inside their folder: no escaping names, links or device files, nothing overwritten, and a disk-space budget against archive bombs.
-- A file may pull in pictures only from its own folder or one level up. Pandoc runs sandboxed, FFmpeg reads local files only, and ImageMagick reads only the format ConvertAll planned, with its script and URL readers off.
+- A file may pull in pictures only from its own folder or one level up; an SVG only the pictures carried inside it. Pandoc runs sandboxed, FFmpeg reads local files only, and ImageMagick reads only the format ConvertAll planned, with its script and URL readers off.
 - Engines are found on PATH or by full path, never in the current folder.
 - Compressed pictures and maps (`.svgz`, `.kmz`) are refused past 512 MB unpacked.
+- PDF pages are drawn with at most 150 million pixels, however big the page says it is.
 - The open window takes files only from the same Windows account.
 
 `tests/test_hardening.py` and `tests/test_archive_safety.py` build hostile files in code and check each of these.
@@ -22,4 +23,4 @@ You'll get a reply within a week. Fixes ship in a new release, and the changelog
 
 Only the latest release gets fixes.
 
-The engines ConvertAll can call (FFmpeg, LibreOffice, ImageMagick, 7-Zip, Pandoc, DjVuLibre, Ghostscript) are separate programs. Report problems in them to their own projects.
+The engines ConvertAll can call (FFmpeg, LibreOffice, ImageMagick, Pandoc, DjVuLibre, Ghostscript) are separate programs. gmsh, for CAD parts, is a library ConvertAll downloads from PyPI the first time a part needs it, pinned by version and SHA-256 (a download that doesn't match is refused). Report problems in them to their own projects.

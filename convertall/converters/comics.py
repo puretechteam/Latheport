@@ -47,21 +47,17 @@ def _page_bytes(path: Path) -> tuple[bytes, tuple[int, int]]:
 
 
 def images_to_pdf(pages: list[Path], dst: Path) -> None:
-    import pymupdf
-    doc = pymupdf.open()
-    scale = 72 / PDF_DPI
+    from .. import pdfium
+    data = []
     for path in pages:
         try:
-            data, (w, h) = _page_bytes(path)
+            data.append(_page_bytes(path))
         except Exception as exc:
             raise ConversionError(f"Couldn't read page {path.name}: {exc}") from exc
-        page = doc.new_page(width=w * scale, height=h * scale)
-        page.insert_image(page.rect, stream=data)
-    doc.save(dst, garbage=3, deflate=True)
+    pdfium.images_to_pdf(data, dst, PDF_DPI)
 
 
-@converter(inputs=COMICS - {"cbr"}, outputs={"pdf"}, terminal=True)
-@converter(inputs={"cbr"}, outputs={"pdf"}, engine="7zip", terminal=True)
+@converter(inputs=COMICS, outputs={"pdf"}, terminal=True)
 def comic_to_pdf(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     work = dst.parent / "_pages"
     found: list[str] = []
@@ -83,40 +79,26 @@ def folder_to_pdf(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     images_to_pdf(pages, dst)
 
 
-def _page_image(doc, page) -> tuple[bytes, str] | None:
-    """The page's picture as stored, if the page is nothing but one full-page JPEG/PNG (scanned
-    comics are), so PDF -> CBZ doesn't re-compress anything."""
-    images = page.get_images(full=True)
-    if len(images) != 1 or page.rotation or page.get_text().strip():
-        return None
-    xref, smask = images[0][0], images[0][1]
-    rects = page.get_image_rects(xref)
-    if smask or len(rects) != 1 or rects[0].get_area() < page.rect.get_area() * 0.95:
-        return None
-    info = doc.extract_image(xref)
-    if info.get("ext") not in ("jpeg", "png") or info.get("colorspace") not in (1, 3):  # gray or RGB, not CMYK
-        return None
-    return info["image"], "jpg" if info["ext"] == "jpeg" else "png"
-
-
 @converter(inputs={"pdf"}, outputs=WRITABLE, terminal=True, options=("dpi",),
            notes=lambda s, d, o: [loss(f"Pages are drawn as pictures at {o.get('dpi') or PDF_DPI} dpi (a page that "
                                        "is one picture is kept as it is)", weight=0)])
 def pdf_to_comic(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    import pymupdf
+    """A page that is nothing but one JPEG or PNG (a scanned comic's are) goes in as stored, with
+    nothing re-compressed; other pages are drawn."""
+    from .. import pdfium
     work = dst.parent / "_pages"
     work.mkdir()
     zoom = int(option("dpi", PDF_DPI)) / 72
-    with pymupdf.open(src) as doc:
-        width = max(3, len(str(doc.page_count)))
-        for i, page in enumerate(doc, 1):
-            stored = _page_image(doc, page)
+    with pdfium.opened(src) as doc:
+        width = max(3, len(str(len(doc))))
+        for i in range(len(doc)):
+            page = doc[i]
+            stored = pdfium.stored_picture(page)
             if stored:
                 data, ext = stored
-                (work / f"{i:0{width}}.{ext}").write_bytes(data)
+                (work / f"{i + 1:0{width}}.{ext}").write_bytes(data)
             else:
-                pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
-                pix.save(str(work / f"{i:0{width}}.jpg"), jpg_quality=92)
+                pdfium.render(page, zoom).save(work / f"{i + 1:0{width}}.jpg", "JPEG", quality=92)
     compress(work, dst, dst_fmt)
 
 

@@ -3,14 +3,14 @@
 Convert, compress or extract any file. Drop it in, pick a format, done.
 
 <p align="center">
-  <img src="screenshots/convertall.png" alt="ConvertAll with an EPUB dropped on it, PDF chosen, and Options open with page size and text size" width="840">
+  <img src="screenshots/convertall.png" alt="ConvertAll 1.3.0: the window part-way through unpacking a 100 MB 7z archive, with Cancel, beside the download size (179 MB for 1.2.0, 82 MB for 1.3.0, 54% smaller) and what else is new: no 7-Zip needed, Cancel any time and a safe close, disk images too" width="840">
 </p>
 
 What's new: see the [changelog](CHANGELOG.md).
 
 ## Just want the app?
 
-Download **`ConvertAll-<version>-windows.zip`** from the [latest release](https://github.com/puretechteam/ConvertAll/releases/latest), unzip it, and run **`ConvertAll\ConvertAll.exe`**. Nothing to install.
+Download **`ConvertAll-<version>-windows.zip`** (82 MB) from the [latest release](https://github.com/puretechteam/ConvertAll/releases/latest), unzip it, and run **`ConvertAll\ConvertAll.exe`**. Nothing to install.
 
 Move the `ConvertAll` folder wherever you like. Keep `ConvertAll.exe` and its `_internal` folder together: the exe won't start without it.
 
@@ -20,7 +20,7 @@ Move the `ConvertAll` folder wherever you like. Keep `ConvertAll.exe` and its `_
 - **3D preview:** drop one 3D model or CAD part and it shows right in the window: drag to turn it, right-drag to move it, scroll to zoom. The expand button in its corner (or a double-click) opens it in a big window with a wireframe view and its size, parts, triangles and materials. Animated models play, in the preview and in the big window, where you can pause, scrub along the timeline, or pick which take to play; rigged characters bend and blend shapes change as they move. It shows every format below that ConvertAll can turn into a 3D model, textures and colors included.
 - **What it keeps:** point at a format in the list to see the route it takes (*via PDF*) and what it can't keep, for example *"JPG has no transparency: see-through areas become white"* or *"STL holds one mesh: all parts are merged into one"*. After converting, the status line says the most important of those, and **Details** shows the whole report: the route and the tools that did each step, what was left out, and what ConvertAll checked on the result (see [What ConvertAll checks](#what-convertall-checks)). *Copy report* puts it on the clipboard.
 - **Options and presets:** under the format there's a small **Options** card. Open it to set what the chosen format takes, and only that: quality (a slider) and maximum size for photos, resolution for PDF pages, video quality, size and frame rate, sound bitrate, mesh detail for CAD parts, and page size and text size for ebooks made into PDFs. Sizes, resolutions, frame rates and bitrates offer the usual values and take any other you type. Presets are one click (*Default*, *Smaller for email and web*, *Best quality*, *For phones and social*, *Ready for 3D printing*); set your own and *+ Save as preset* keeps them. Nothing set means ConvertAll's usual defaults; your choices are remembered, and the card's header says what's on.
-- **Terminal:** `convertall-cli.exe` (or `convertall` when installed with pip).
+- **Terminal:** `convertall-cli.exe` (or `convertall` when installed with pip). Ctrl+C stops a conversion cleanly, as *Cancel* does.
 - **Right-click:** in the window, go to ☰ → *Add to right-click menu*. Explorer then shows **Convert with ConvertAll** on files and folders, **Extract with ConvertAll** on archives (zip, rar, 7z, iso, tar.gz and the rest), which unpacks straight away (select several archives and they're extracted as one batch), and **View with ConvertAll** on 3D models and CAD parts, which opens just the viewer. On Windows 11 it's under *Show more options*. After an update, or if you move ConvertAll to another folder, the menu points to it again the next time you open it.
 - **Start menu:** ☰ → *Add to Start menu*, then type "ConvertAll" in Start to open it.
 
@@ -41,23 +41,23 @@ Questions, a file that won't convert, an idea, or just want to talk about it? Jo
 | Subtitles | srt vtt ass ssa sbv (YouTube) sub (MicroDVD) ttml/dfxp smi (SAMI), all to each other; pull the subtitle track out of a video | built in ([pysubs2](https://github.com/tkarabela/pysubs2); FFmpeg for videos) |
 | Office | docx doc odt rtf pages wps hwp (+ docm dotx dot), xlsx xls ods numbers csv dbf (+ xlsm xlsb xltx), pptx ppt odp key (+ pptm ppsx pps potx) → pdf and each other; pdf → docx; html → docx/odt/rtf | LibreOffice |
 | Drawings | vsdx vsd (Visio), pub (Publisher), odg, cdr (CorelDRAW) → pdf/png/svg | LibreOffice |
-| PDF | pdf → images (one folder per multi-page doc), pdf → txt, images/txt/html/md → pdf, xps → pdf | built in |
+| PDF | pdf → images (one folder per multi-page doc), pdf → txt, images/txt/html/md → pdf, xps oxps → pdf | built in ([PDFium](https://pdfium.googlesource.com/pdfium/) through pypdfium2; Qt draws XPS and SVG; bookport lays out html and txt) |
 | Markdown & HTML | md → html, html → md, docx → html/md (md ↔ docx chains through html); mht/mhtml saved pages → html/pdf; Jupyter ipynb → md/html (and on to pdf/docx) | built in (+ LibreOffice for → docx) |
 | Markup languages | tex (LaTeX), rst, org, adoc (AsciiDoc), wiki (MediaWiki) ↔ md html docx odt epub | Pandoc |
 | Scanned books | djvu → pdf (and on to images), djvu → txt (its OCR layer) | DjVuLibre |
-| Comics | cbz cbr cb7 cbt → pdf (pages kept as they are, in reading order), between each other, and pdf → cbz/cb7/cbt; a folder of images → pdf or cbz. Renamed comics (a "cbr" that's really a zip) are detected by content | built in (7-Zip for real RAR comics) |
+| Comics | cbz cbr cb7 cbt → pdf (pages kept as they are, in reading order), between each other, and pdf → cbz/cb7/cbt; a folder of images → pdf or cbz. Renamed comics (a "cbr" that's really a zip) are detected by content | built in ([packport](https://github.com/puretechteam/packport) for RAR comics) |
 | Ebooks | epub mobi azw3 azw fb2 fbz lit pdb lrf htmlz txtz pml pmlz rb tcr snb, all to each other, and chm in; ebooks → pdf (page size and text size as settings), docx, rtf, html, md, txt; html/docx/odt/rtf/md/txt and pdf → ebooks; comics → fixed-layout epub/mobi/azw3 and the rest. Copy-protected (DRM) books are refused, never unlocked | built in ([bookport](https://github.com/puretechteam/bookport)) |
 | Email | eml and Outlook msg → pdf/html/txt: headers, the message (with its inline pictures) and a list of attachments | built in |
 | Maps & GPS | gpx kml kmz geojson, all to each other; → csv (one row per point) | built in |
 | Contacts & calendars | vcf (vCard) ↔ csv/json, ics (iCalendar) ↔ csv/json; Google and Outlook CSV exports are understood | built in |
 | 3D models | stl obj ply off glb gltf 3mf dae fbx 3ds usd usdz abc, all to each other, and Blender's blend → all of them (parts, colors and textures kept where the format can hold them). FBX: binary and ASCII, 2006 onward; textures are found even when the file points at another PC. USD: usda, usdc and usdz, with references, payloads and variants. Alembic: the Ogawa kind (2013 onward). blend: Blender 2.8 onward (checked with 2.83, 2.93, 3.3, 3.5 and later), with modifiers, curves, text and metaballs as Blender shows them. Animation is kept between FBX, glTF, USD and Alembic, and read from 3DS and blend; skeletons (skinning) and blend shapes between FBX, glTF and USD, and from blend | built in ([meshport](https://github.com/puretechteam/meshport) for FBX, 3DS, USD, Alembic and blend) |
-| CAD | step/stp, iges/igs, brep → watertight stl (and from there any mesh format); dxf → svg/pdf/png; svg/pdf vector drawings → dxf (for laser cutters) | built in |
+| CAD | step/stp, iges/igs, brep → watertight stl (and from there any mesh format); dxf → svg/pdf/png; svg/pdf vector drawings → dxf (for laser cutters) | [gmsh](https://gmsh.info) for step, iges and brep (downloaded the first time a part needs it); the rest built in |
 | Medical | DICOM (.dcm or no extension) → png/jpg/tiff/… with the scanner's display window applied; multi-frame → folder, gif or multi-page tiff/pdf; header → json | built in |
 | Data | json jsonl yaml toml xml ini plist csv tsv xlsx sqlite, all to each other | built in |
 | Fonts | ttf otf woff woff2, all to each other (TrueType and CFF outlines converted as needed); ttc collections → their fonts | built in |
-| Archives | create zip 7z rar tar tar.gz tar.bz2 tar.xz tar.zst tar.lz4 gz bz2 xz zst lz4 br lzma z cpio iso wim from **any file or folder**; extract all of those plus cab arj lzh dmg rpm deb ar msi msp xar/pkg vhd vhdx vmdk vdi qcow2 img squashfs udf apfs hfs zipx, split archives (.001, .r00), and zip-based packages (jar war ear apk aab ipa xpi crx vsix nupkg whl appx msix); repack any archive into another | built in ([packport](https://github.com/puretechteam/packport) for rar, z and cpio), 7-Zip for disk images, wim etc. |
+| Archives | create zip 7z rar tar tar.gz tar.bz2 tar.xz tar.zst tar.lz4 gz bz2 xz zst lz4 br lzma z cpio iso wim from **any file or folder**; extract all of those plus cab arj lzh dmg rpm deb ar msi msp xar/pkg vhd vhdx vmdk vdi qcow2 img squashfs udf apfs hfs zipx chm lit, split archives (.001, .r00), and zip-based packages (jar war ear apk aab ipa xpi crx vsix nupkg whl appx msix); disk images give the files on them (FAT, NTFS, ext2/3/4, HFS+, APFS), a folder per partition; repack any archive into another | built in ([packport](https://github.com/puretechteam/packport) for rar, cab, iso, udf, wim, disk images and the rest; no 7-Zip needed) |
 
-When there's no direct conversion, ConvertAll chains steps automatically, for example docx → pdf → png, fbx → glb → 3mf, or step → stl → glb. If a step needs an engine that's missing, ConvertAll offers a one-time install right from the window (with `winget`; Ghostscript, which winget doesn't carry, is downloaded from its official release and unpacked into ConvertAll's own folder). Check engine status with ☰ → *Engines…* or `convertall engines`.
+When there's no direct conversion, ConvertAll chains steps automatically, for example docx → pdf → png, fbx → glb → 3mf, or step → stl → glb. If a step needs an engine that's missing, ConvertAll offers a one-time install right from the window (with `winget`; Ghostscript and gmsh, which winget doesn't carry, are downloaded from their official releases, checked against their published SHA-256 and unpacked into ConvertAll's own folder). Check engine status with ☰ → *Engines…* or `convertall engines`.
 
 STL and 3MF are written Z-up (and read as Z-up), so models stand upright in 3D-printing slicers. The other 3D formats are Y-up.
 
@@ -65,7 +65,14 @@ Photos keep their details (camera, date, place: EXIF) and color profile when the
 
 Some outputs come back as a **folder**: multi-page PDFs and multi-frame DICOMs saved as single-image formats, plus OBJ and USD models that have textures or materials (stored as side files).
 
-Extracting is careful with archives from the internet: nothing lands outside the folder, links are left out, names Windows can't hold are renamed the way 7-Zip does, files never overwrite each other (`a (1).txt`), and an archive that would fill the disk stops before it does. Anything left out is reported. Keep 7-Zip at 25.00 or newer: older versions have a known link flaw, which ConvertAll works around but points out.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="screenshots/extracting_dark.png">
+    <img src="screenshots/extracting_light.png" alt="Extracting a 100 MB 7z archive: the status line counts the megabytes unpacked so far, and Convert has become Cancel" width="400">
+  </picture>
+</p>
+
+Extracting is careful with archives from the internet: nothing lands outside the folder, links are left out, names Windows can't hold are renamed (`a:b` becomes `a_b`, `CON.txt` becomes `_CON.txt`), files never overwrite each other (`a (1).txt`), and an archive that would fill the disk stops before it does. Anything left out is reported. Every archive is read by ConvertAll itself, so there's no outside program to keep up to date, and it's about as fast as ConvertAll was with 7-Zip: a 58 MB comic book (CBR) unpacks in 0.47 s instead of 0.49 s and becomes a PDF in 0.60 s instead of 0.86 s, and a RAR that unpacks to 242 MB takes 0.58 s instead of 0.59 s. 7z files packed with PPMd or BCJ2 take about 1.3 times as long (see the CHANGELOG). Password-protected archives, BitLocker, LUKS and encrypted DMGs are refused with a message; they're never unlocked.
 
 Other files get the same care: a document may pull in pictures only from its own folder or one level up, Pandoc runs sandboxed so an include line can't copy another file into the result, FFmpeg reads local files only, and engines are never run from the current folder. See [SECURITY.md](SECURITY.md).
 
@@ -134,14 +141,24 @@ python -m venv .venv
 .venv\Scripts\python -m pytest                  # tests (engine tests skip if the engine is missing)
 .venv\Scripts\python -m pytest tests\test_e2e.py --e2e   # every format -> every target it can reach (slow)
 .venv\Scripts\ruff check .                      # lint
-.venv\Scripts\python packaging\release.py       # build dist\ConvertAll\ and zip it for a GitHub release
+.venv\Scripts\python packaging\release.py       # build dist\ConvertAll\ and zip it for a GitHub release (needs Rust's cargo too)
 .venv\Scripts\python packaging\bake_shaders.py  # after editing the 3D viewer's shaders (convertall\assets\shaders)
 python packaging\make_icon.py                   # regenerate the icon
 ```
+
+`convertall-cli.exe` is a small Rust program (`packaging/launcher`) that runs `ConvertAll.exe --cli`, so the download carries ConvertAll's code once. `release.py` won't zip a build in which a file names your home folder (a path compiled into a binary), or one with a bundled component it found no license text for; it lists them instead. The zip gets `LICENSE.txt` and a `licenses` folder (see [License](#license)).
+
+`packaging\screenshots.py` takes the README's pictures from the real window, with sample files it makes itself.
 
 Adding a format means writing one function in `convertall/converters/` with
 `@converter(inputs={...}, outputs={...}, engine=...)`. Routing, the CLI and the window pick it up automatically.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). ConvertAll calls FFmpeg, LibreOffice, ImageMagick, 7-Zip, Pandoc, DjVuLibre and Ghostscript as separate programs when they are installed; each keeps its own license.
+ConvertAll's own code is MIT, see [LICENSE](LICENSE).
+
+The Windows download also contains the libraries ConvertAll is built on, each under its own license (MIT, BSD, Apache, LGPL and others: the list, with each one's source, is in the zip's `licenses` folder, beside their license texts). One of them, the x265 HEIC encoder inside pillow-heif, is under the GPL (version 2 or later), so the download as a whole is distributed under the GPL's terms. Qt and a few archive libraries are LGPL. gmsh (GPL) isn't in the download: ConvertAll fetches it from PyPI the first time a CAD part needs it.
+
+ConvertAll calls FFmpeg, LibreOffice, ImageMagick, Pandoc, DjVuLibre and Ghostscript as separate programs when they are installed; each keeps its own license.
+
+The archive tests use a few test files from other projects, kept with their licenses in `tests/data/archives`: [libarchive](https://github.com/libarchive/libarchive)'s (BSD, `COPYING-libarchive.txt`) and [dfvfs](https://github.com/log2timeline/dfvfs)'s disk images (Apache License 2.0, `LICENSE-dfvfs.txt`).

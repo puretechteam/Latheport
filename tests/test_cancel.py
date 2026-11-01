@@ -208,3 +208,29 @@ def test_libreoffice_wait_stops_on_cancel_and_has_a_limit(tmp_path):
 def _in_token(token, fn):
     with cancel.using(token):
         fn()
+
+
+@pytest.mark.parametrize("kind", ["tar.xz", "tar.gz", "zip"])
+def test_stopping_an_extraction_says_stopped_not_damaged(tmp_path, monkeypatch, kind):
+    """Stopping is Cancelled, which is a ConversionError: the readers' errors that send an archive
+    to packport (zip, 7z) or call it damaged (the rest) mustn't catch it. Before: a stopped
+    tar.xz was "Couldn't extract big.tar.xz; it looks damaged (Stopped)" (exit 1 in the terminal,
+    not 130), and a stopped ZIP was unpacked again from the start by packport."""
+    import tarfile
+
+    from convertall.converters import archives
+    arc = tmp_path / f"big.{kind}"
+    parts = [(f"part{i}.bin", os.urandom(3 << 20)) for i in range(6)]  # 3 MB each: several chunks
+    if kind == "zip":
+        with zipfile.ZipFile(arc, "w", zipfile.ZIP_STORED) as z:
+            for name, data in parts:
+                z.writestr(name, data)
+    else:
+        with tarfile.open(arc, "w:" + kind.split(".")[1]) as tar:
+            for name, data in parts:
+                (tmp_path / name).write_bytes(data)
+                tar.add(tmp_path / name, name)
+    monkeypatch.setattr(archives, "_extract_packport", lambda *a: pytest.fail("unpacked again by packport"))
+    with cancel.using(_StopAfter(4)), pytest.raises(cancel.Cancelled) as info:
+        pipeline.extract(arc, out_dir=tmp_path / "out")
+    assert "damaged" not in str(info.value)

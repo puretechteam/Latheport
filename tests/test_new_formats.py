@@ -1,6 +1,7 @@
 import json
 import plistlib
 import zipfile
+from pathlib import Path
 
 import pymupdf
 import pytest
@@ -29,7 +30,7 @@ def _page_colors(pdf):
         return [doc.extract_image(page.get_images()[0][0])["width"] for page in doc], doc.page_count
 
 
-@pytest.mark.parametrize("fmt", ["cbz", "cb7", "cbt", pytest.param("cbr", marks=needs("7zip"))])
+@pytest.mark.parametrize("fmt", ["cbz", "cb7", "cbt", "cbr"])
 def test_comic_to_pdf(samples, tmp_path, fmt):
     pdf = convert(samples(fmt), "pdf", out_dir=tmp_path)
     with pymupdf.open(pdf) as doc:
@@ -90,7 +91,6 @@ def test_renamed_comics_detected_by_content(samples, tmp_path):
     assert detect(fake_cbz) == "cbr"
 
 
-@needs("7zip")
 def test_cbr_to_cbz(samples, tmp_path):
     cbz = convert(samples("cbr"), "cbz", out_dir=tmp_path)
     with zipfile.ZipFile(cbz) as z:
@@ -211,3 +211,77 @@ def test_illustrator_and_pdf_to_svg(samples, tmp_path):
         convert(old_ai, "pdf")
     svgs = convert(samples("pdf"), "svg", out_dir=tmp_path / "svg")
     assert svgs.is_dir() and all("<svg" in p.read_text() for p in svgs.iterdir())
+
+
+def test_files_dated_before_1980_go_into_a_zip(tmp_path):
+    # ZIP's DOS dates start in 1980; a file from an old RPM or tar dated 1970 used to stop the zip
+    import os
+
+    from convertall.converters.archives import compress
+    folder = tmp_path / "old"
+    folder.mkdir()
+    (folder / "a.txt").write_text("from 1970")
+    os.utime(folder / "a.txt", (0, 0))
+    compress(folder, tmp_path / "out.zip", "zip")
+    with zipfile.ZipFile(tmp_path / "out.zip") as z:
+        assert z.read("old/a.txt") == b"from 1970"
+        assert z.getinfo("old/a.txt").date_time[0] == 1980
+
+
+@pytest.mark.parametrize("fmt", ["rar", "cab", "wim", "rpm", "squashfs", "lzh", "arj", "iso", "udf", "dmg", "vhd", "vhdx",
+                                 "vmdk", "qcow2", "vdi", "deb", "xar", "pkg", "msi", "apfs", "hfs", "ar"])
+def test_archives_without_an_extension_are_recognised(samples, tmp_path, fmt):
+    import shutil
+    src = samples(fmt)
+    if src is None:
+        pytest.skip(f"can't make a {fmt} sample here")
+    bare = tmp_path / "download"
+    shutil.copyfile(src, bare)
+    assert detect(bare) == fmt
+
+
+def test_a_lone_first_piece_says_the_others_are_missing(samples, tmp_path):
+    # Only the .001 of a four-piece split: the message should say what's wrong, not just "damaged"
+    import shutil
+    lone = tmp_path / "lone" / "sample.001"
+    lone.parent.mkdir()
+    shutil.copyfile(samples("001"), lone)
+    with pytest.raises(ConversionError, match=r"other pieces \(\.002, \.003"):
+        extract(lone, tmp_path / "x")
+    assert extract(samples("001"), tmp_path / "all").is_dir()  # all four pieces: it works
+
+
+def _convert_on_windows_platform(src: Path, fmt: str, out_dir: Path) -> Path:
+    """convert() in a child process on Qt's real platform: test_gui.py puts the session on Qt's
+    offscreen one, which has no fonts on Windows (the app never uses it), and XPS text needs them."""
+    import os
+    import subprocess
+    import sys
+    env = {k: v for k, v in os.environ.items() if k != "QT_QPA_PLATFORM"}
+    code = (f"from convertall.pipeline import convert; print(convert(r'{src}', '{fmt}', out_dir=r'{out_dir}'))")
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=300, check=False)
+    assert p.returncode == 0, p.stderr[-800:]
+    return Path(p.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("fmt", ["xps", "oxps"])
+def test_xps_becomes_a_pdf_with_its_shapes_and_searchable_text(samples, tmp_path, fmt):
+    """XPS pages are drawn with Qt: the shapes where they were, and the text (glyphs from an
+    embedded font) still there to search and copy."""
+    from .samples import TEXT
+    pdf = _convert_on_windows_platform(samples(fmt), "pdf", tmp_path)
+    with pymupdf.open(pdf) as doc:
+        assert doc.page_count == 2
+        for i, page in enumerate(doc, 1):
+            assert f"{TEXT} {i}." in page.get_text()
+            pix = page.get_pixmap()
+            r, g, b = pix.pixel(int(300 * 0.75), int(320 * 0.75))  # inside the page's blue rectangle
+            assert (r, g, b) == (0x33, 0x66, 0xCC)
+
+
+def test_xps_printed_by_windows_keeps_its_text(tmp_path):
+    """A real XPS from Windows' XPS printer (libarchive's test file), its fonts obfuscated as the
+    format has them: the text comes out the same as the printer wrote it."""
+    src = Path(__file__).parent / "data" / "archives" / "test_compat_zip_7.xps"
+    with pymupdf.open(_convert_on_windows_platform(src, "pdf", tmp_path)) as doc:
+        assert "test XPS file created with Win XP XPS printer" in doc[0].get_text()

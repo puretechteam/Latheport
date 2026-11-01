@@ -294,8 +294,8 @@ def test_takes_that_move_different_things_play_together():
 
 
 def _app():
-    from PySide6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication([])
+    from convertall.qtdraw import app as qt_app
+    return qt_app()  # kept for the whole session: a Qt application made twice has no fonts
 
 
 def test_the_viewer_window_plays_and_scrubs():

@@ -167,6 +167,9 @@ QPushButton:checked {{ border-color: {accent}; color: {accent}; background: {acc
 QPushButton:disabled {{ color: {muted}; }}
 QPushButton#primary {{ background: {accent}; color: {accent_text}; border: none; font-weight: 600; }}
 QPushButton#primary:disabled {{ background: {border}; color: {muted}; }}
+QPushButton#primary[cancel="true"] {{ background: {surface}; color: {text}; border: 1px solid {border}; }}
+QPushButton#primary[cancel="true"]:hover {{ border-color: {accent}; }}
+QPushButton#primary[cancel="true"]:disabled {{ color: {muted}; }}
 QPushButton#link {{ background: transparent; border: none; color: {accent}; padding: 1px 0; min-height: 0; }}
 QPushButton#link:hover {{ text-decoration: underline; }}
 QToolButton {{ background: transparent; border: none; font-size: 14pt; color: {muted}; padding: 0 6px; }}
@@ -181,6 +184,23 @@ QMenu::separator {{ height: 1px; background: {border}; margin: 4px 8px; }}
 
 
 THEME = dict(DARK)  # the palette in use, for widgets that paint themselves
+BUTTON_PAD = 16  # QSS: QPushButton { padding: 0 16px }
+
+
+def fit_buttons(box: QMessageBox) -> QMessageBox:
+    """Fusion sizes a message box's buttons without the stylesheet's padding, which clipped longer
+    labels ("Stop and close" showed as "top and clos"): give each room for its whole label."""
+    for b in box.buttons():
+        b.setMinimumWidth(b.fontMetrics().horizontalAdvance(b.text()) + 2 * BUTTON_PAD + 4)
+    return box
+
+
+def restyle(widget: QWidget, **properties) -> None:
+    """Set properties the stylesheet selects on, and apply it again."""
+    for name, value in properties.items():
+        widget.setProperty(name, value)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
 
 
 def is_dark() -> bool:
@@ -302,7 +322,9 @@ class Job(QThread):
             if self.cancelled:
                 break
             count = f" {i} of {len(self.files)}" if len(self.files) > 1 else ""
-            self.progress.emit(f"{'Extracting' if self.target is None else 'Converting'}{count} · {f.name}")
+            line = f"{'Extracting' if self.target is None else 'Converting'}{count} · {f.name}"
+            self.progress.emit(line)
+            self.token.listener = self._counter(line)
             try:
                 found: list[str] = []
                 if self.target is None:
@@ -321,6 +343,16 @@ class Job(QThread):
             except Exception as exc:  # noqa: BLE001 - a surprise must not leave the window spinning forever
                 errors.append(f"{f.name}: unexpected {type(exc).__name__}: {exc}")
         self.done.emit(outputs, errors, notes, reports)
+
+    def _counter(self, line: str):
+        """The status line with the MB written so far, for archives over 50 MB."""
+        def told(done: int, total: int) -> None:
+            if total > BIG_ARCHIVE:
+                self.progress.emit(f"{line} · {done >> 20:,} of {total >> 20:,} MB")
+        return told
+
+
+BIG_ARCHIVE = 50 << 20  # bytes: past this an extraction says how far it's got
 
 
 class InstallJob(QThread):
@@ -405,12 +437,12 @@ def _thumbnail(path: Path, fmt: str, w: int, h: int) -> QImage | None:
     if path.stat().st_size > THUMB_MAX_BYTES:
         return None
     if fmt == "pdf":
-        import pymupdf
-        with pymupdf.open(path) as doc:
+        from . import pdfium
+        with pdfium.opened(path) as doc:
             page = doc[0]
-            zoom = min(w / page.rect.width, h / page.rect.height)
-            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
-            return QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()
+            pw, ph = page.get_size()
+            img = pdfium.render(page, min(w / (pw or 1), h / (ph or 1)))
+        return QImage(img.tobytes(), img.width, img.height, img.width * 3, QImage.Format_RGB888).copy()
     if category(fmt) != "Image" or fmt in ("svg", "eps", "ps", "ai", "emf", "wmf"):
         return None
     from PIL import Image, ImageOps
@@ -1615,6 +1647,7 @@ class Window(QWidget):
         self.outputs: list[Path] = []
         self.job: Job | None = None
         self.close_when_done = False  # closed while converting: it closes once the job has stopped
+        self.job_started = 0.0
         self.last_add = 0.0
         self.pending_extract: list[Path] = []
         self.extract_timer = QTimer(self)
@@ -1879,6 +1912,8 @@ class Window(QWidget):
     def convert_clicked(self) -> None:
         """While a job runs, the Convert button is its Cancel button."""
         if isinstance(self.job, Job):
+            if time.monotonic() - self.job_started < QApplication.doubleClickInterval() / 1000:
+                return  # the second click of a double-click on Convert
             self.cancel_job()
         else:
             self.start_convert()
@@ -1892,6 +1927,9 @@ class Window(QWidget):
         self.set_status("Stopping…")
 
     def confirm_stop(self) -> bool:
+        return self.stop_box().exec() == QMessageBox.Yes
+
+    def stop_box(self) -> QMessageBox:
         box = QMessageBox(self)
         box.setWindowTitle("ConvertAll")
         box.setIcon(QMessageBox.Question)
@@ -1900,7 +1938,7 @@ class Window(QWidget):
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
         box.button(QMessageBox.Yes).setText("Stop and close")
         box.button(QMessageBox.Cancel).setText("Keep converting")
-        return box.exec() == QMessageBox.Yes
+        return fit_buttons(box)
 
     def closeEvent(self, event) -> None:
         """Closing mid-job asks first, then stops the job and closes once it has: Qt would
@@ -1909,6 +1947,9 @@ class Window(QWidget):
         if isinstance(job, Job) and job.isRunning():
             if not self.close_when_done and not self.confirm_stop():
                 event.ignore()
+                return
+            if self.job is None:  # it finished while the question was open: nothing to stop
+                super().closeEvent(event)
                 return
             self.close_when_done = True
             self.cancel_job()
@@ -1931,14 +1972,12 @@ class Window(QWidget):
         self.run_job(Job(self.files, target, missing, options.applying(self.options_panel.chosen(), keys)))
 
     def start_extract(self) -> None:
-        from .converters.archives import NATIVE_EXTRACT
-        needs_7zip = any(f not in NATIVE_EXTRACT for f in self.fmts)
-        missing = ["7zip"] if needs_7zip and not engines.available("7zip") else []
-        if missing and not self.confirm_install(missing):
-            return
-        self.run_job(Job(self.files, None, missing))
+        self.run_job(Job(self.files, None, []))  # every archive is read built in: nothing to install
 
     def confirm_install(self, keys: list[str]) -> bool:
+        return self.install_box(keys).exec() == QMessageBox.Yes
+
+    def install_box(self, keys: list[str]) -> QMessageBox:
         engs = [engines.ENGINES[k] for k in keys]
         names = " and ".join(f"{e.name} ({e.size})" for e in engs)
         box = QMessageBox(self)
@@ -1948,7 +1987,7 @@ class Window(QWidget):
         box.setInformativeText("It's free and installs once, right from here. Install it now?")
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
         box.button(QMessageBox.Yes).setText("Install")
-        return box.exec() == QMessageBox.Yes
+        return fit_buttons(box)
 
     def run_job(self, job: Job) -> None:
         self.job = job
@@ -1956,6 +1995,8 @@ class Window(QWidget):
             w.setEnabled(False)
         self.convert_btn.setText("Cancel")
         self.convert_btn.setEnabled(True)
+        self.job_started = time.monotonic()
+        restyle(self.convert_btn, cancel=True)
         self.show_btn.hide()
         self.details_btn.hide()
         self.bar.setRange(0, 0)
@@ -1970,6 +2011,7 @@ class Window(QWidget):
         stopped = isinstance(self.job, Job) and self.job.cancelled
         self.job = None
         self.convert_btn.setText("Convert")
+        restyle(self.convert_btn, cancel=False)
         if self.close_when_done:
             # hidden while it stopped, so closing it isn't "the last window closed": quit unless
             # a 3D viewer is still open
@@ -2074,10 +2116,12 @@ class Window(QWidget):
         box.setWindowTitle("ConvertAll")
         box.setIconPixmap(self.windowIcon().pixmap(48, 48))
         box.setTextFormat(Qt.RichText)
+        import packport
+        archives = "packport (with packport-native)" if packport.accelerated() else "packport"
         box.setText(f"<b>ConvertAll {__version__}</b><br>"
                     "Convert, compress or extract any file.<br><br>"
-                    "Uses Pillow, PyMuPDF, py7zr, fontTools, trimesh, gmsh, ezdxf, pydicom, meshport, "
-                    "packport, bookport, vtracer, pysubs2, pycdlib and, when needed, FFmpeg, 7-Zip, "
+                    "Uses Pillow, PDFium, py7zr, fontTools, trimesh, gmsh, ezdxf, pydicom, meshport, "
+                    f"{archives}, bookport, vtracer, pysubs2, pycdlib and, when needed, FFmpeg, "
                     "LibreOffice, ImageMagick, Pandoc, DjVuLibre and Ghostscript.<br><br>"
                     f'Questions, ideas or just chatting: <a href="{DISCORD}">ConvertAll on Discord</a>')
         for text in box.findChildren(QLabel):

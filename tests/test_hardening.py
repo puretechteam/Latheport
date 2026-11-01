@@ -204,3 +204,70 @@ def test_a_launch_never_opens_a_second_window(monkeypatch, tmp_path):
     assert instance.main([]) == 1
     assert told == [True]
     held.unlock()
+
+
+def _red(img: Image.Image) -> int:
+    return sum(1 for r, g, b in img.convert("RGB").get_flattened_data() if r > 200 and g < 60 and b < 60)
+
+
+@pytest.mark.parametrize("how", ["absolute", "file-uri", "relative", "entity", "css-import"])
+@pytest.mark.parametrize("dst", ["png", "pdf"])
+def test_an_svg_cannot_draw_a_file_from_elsewhere_on_the_computer(tmp_path, how, dst, monkeypatch):
+    """An SVG's pictures come from inside it (data: URIs). Qt's SVG renderer would load an
+    <image> by absolute path, so a downloaded SVG could copy any picture on the computer into
+    its result."""
+    from convertall import pdfium
+    secret = tmp_path / "secret.png"
+    Image.new("RGB", (100, 100), (255, 0, 0)).save(secret)
+    docs = tmp_path / "a" / "b" / "docs"
+    docs.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)  # a relative name mustn't be found in the working folder either
+    ref = {"absolute": str(secret), "file-uri": secret.as_uri(), "relative": "secret.png",
+           "entity": "&p;", "css-import": "#none"}[how]
+    head = f'<!DOCTYPE svg [<!ENTITY p "{secret}">]>' if how == "entity" else ""
+    style = f'<style>@import url("{secret.as_uri()}"); @import "{secret}";</style>' if how == "css-import" else ""
+    svg = docs / "picture.svg"
+    svg.write_text(f'<?xml version="1.0"?>{head}<svg xmlns="http://www.w3.org/2000/svg" '
+                   f'xmlns:xlink="http://www.w3.org/1999/xlink" width="100" height="100">{style}'
+                   f'<image width="100" height="100" xlink:href="{ref}" href="{ref}"/></svg>', encoding="utf-8")
+    out = pipeline.convert(svg, dst, out_dir=tmp_path / "out")
+    if dst == "png":
+        assert _red(Image.open(out)) == 0
+    else:
+        with pdfium.opened(out) as doc:
+            assert _red(pdfium.render(doc[0], 1)) == 0
+
+
+def test_an_svg_keeps_its_own_pictures(tmp_path):
+    """A picture inside the SVG (a data: URI) is still drawn."""
+    import base64
+    buf = io.BytesIO()
+    Image.new("RGB", (100, 100), (255, 0, 0)).save(buf, "PNG")
+    uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    svg = tmp_path / "own.svg"
+    svg.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+                   f'width="100" height="100"><image width="100" height="100" xlink:href="{uri}"/></svg>',
+                   encoding="utf-8")
+    assert _red(Image.open(pipeline.convert(svg, "png", out_dir=tmp_path / "out"))) > 1000
+
+
+@pytest.mark.parametrize("dst", ["png", "cbz"])
+def test_a_huge_pdf_page_is_drawn_at_a_size_that_fits(tmp_path, dst, monkeypatch):
+    """A PDF page can be 200 inches square: at 150 dpi that's 30,000 pixels a side, 3.6 GB to
+    draw, from a file of a few hundred bytes. Pages are drawn no bigger than PAGE_PIXELS."""
+    import pypdfium2
+
+    from convertall.pdfium import PAGE_PIXELS
+    doc = pypdfium2.PdfDocument.new()
+    doc.new_page(14400, 14400)
+    src = tmp_path / "huge.pdf"
+    doc.save(str(src))
+    doc.close()
+    out = pipeline.convert(src, dst, out_dir=tmp_path / "out")
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", None)  # the picture is big on purpose, to measure
+    if dst == "png":
+        with Image.open(out) as img:
+            assert img.width * img.height <= PAGE_PIXELS
+    else:
+        with zipfile.ZipFile(out) as z, Image.open(io.BytesIO(z.read(z.namelist()[0]))) as img:
+            assert img.width * img.height <= PAGE_PIXELS

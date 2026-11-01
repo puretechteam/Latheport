@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import engines, registry
+from .errors import ConversionError
 from .formats import category
 from .losses import FEATURES, Loss, typical
 
@@ -28,6 +29,7 @@ TRIMESH_READ = {"stl", "obj", "ply", "off", "3mf", "dae"}
 PAGED = {"pdf", "xps", "oxps"}
 WORDS_IN = {"pdf", "docx", "odt", "rtf", "txt", "md", "html"}  # documents bookport counts words in too
 NATIVE_ARCHIVES = {"zip", "tar", "tar.gz", "tar.bz2", "tar.xz", "7z"} | {"cbz", "cbt", "cb7"}
+PACKPORT_ARCHIVES = {"rar", "cbr", "cpio", "iso", "wim"}  # the archives ConvertAll writes that packport reads
 
 
 class Unreadable(Exception):
@@ -90,7 +92,7 @@ def _reader(fmt: str):
         return _font
     if fmt == "ttc":
         return _collection
-    if fmt in NATIVE_ARCHIVES:
+    if fmt in NATIVE_ARCHIVES | PACKPORT_ARCHIVES:
         return _archive
     if fmt == "dcm":
         return _dicom
@@ -136,11 +138,23 @@ def _image(path: Path, fmt: str) -> dict:
 
 
 def _pages(path: Path, fmt: str) -> dict:
-    import pymupdf
-    with pymupdf.open(path) as doc:
-        if not doc.page_count:
-            raise Unreadable("it has no pages")
-        return {"pages": doc.page_count}
+    if fmt in ("xps", "oxps"):
+        from .qtdraw import Xps
+        try:
+            doc = Xps(path)
+        except ConversionError as exc:
+            raise Unreadable(str(exc)) from None
+        doc.close()
+        return {"pages": len(doc.pages)}
+    from . import pdfium
+    try:
+        with pdfium.opened(path) as doc:
+            count = len(doc)
+    except ConversionError as exc:
+        raise Unreadable(str(exc)) from None
+    if not count:
+        raise Unreadable("it has no pages")
+    return {"pages": count}
 
 
 def _ffprobe() -> str | None:
@@ -272,6 +286,13 @@ def _archive(path: Path, fmt: str) -> dict:
         import py7zr
         with py7zr.SevenZipFile(path) as z:
             names = [i.filename for i in z.list() if not i.is_directory]
+    elif fmt in PACKPORT_ARCHIVES:
+        import packport
+        try:
+            with packport.open(path) as a:  # links are left out, as extracting leaves them out
+                names = [m.name for m in a.members if m.is_file]
+        except packport.PackportError as exc:
+            raise Unreadable(str(exc)) from None
     else:
         import tarfile
         with tarfile.open(path) as t:
@@ -488,16 +509,17 @@ class Report:
 
 # which library does a built-in step's work (an engine-backed step names its engine)
 TOOLS = {
-    "pillow_convert": "Pillow", "trace_to_svg": "vtracer", "pages_to_images": "PyMuPDF", "svg_to_image": "PyMuPDF",
-    "to_pdf": "PyMuPDF", "to_text": "PyMuPDF", "html_to_pdf": "PyMuPDF", "illustrator_to_pdf": "PyMuPDF",
-    "comic_to_pdf": "PyMuPDF", "folder_to_pdf": "PyMuPDF", "pdf_to_comic": "PyMuPDF", "cad_to_stl": "gmsh",
+    "pillow_convert": "Pillow", "trace_to_svg": "vtracer", "pages_to_images": "PDFium", "svg_to_image": "Qt",
+    "xps_to_pdf": "Qt", "svg_to_pdf": "Qt", "to_text": "PDFium", "html_to_pdf": "bookport",
+    "illustrator_to_pdf": "PDFium", "comic_to_pdf": "PDFium", "folder_to_pdf": "PDFium", "pdf_to_comic": "PDFium",
+    "cad_to_stl": "gmsh",
     "dxf_render": "ezdxf", "vectors_to_dxf": "ezdxf", "font_convert": "fontTools", "split_collection": "fontTools",
     "pysubs2_convert": "pysubs2", "srt_vtt": "ConvertAll", "dicom_to_image": "pydicom", "dicom_to_json": "pydicom",
     "mesh_convert": "trimesh", "meshport_convert": "meshport", "meshport_to_files": "meshport",
     "markdown_to_html": "Markdown", "docx_to_html": "mammoth", "ipynb_to_html": "Markdown",
     "book_convert": "bookport", "comic_to_book": "bookport",
 }
-DISTRIBUTIONS = {"Pillow": "pillow", "PyMuPDF": "pymupdf", "Markdown": "markdown"}
+DISTRIBUTIONS = {"Pillow": "pillow", "PDFium": "pypdfium2", "Qt": "PySide6", "Markdown": "markdown"}
 
 
 @functools.cache

@@ -1,6 +1,7 @@
 """Compress anything, extract any archive, and repack archives into other archive types."""
 
 import bz2
+import contextlib
 import functools
 import gzip
 import io
@@ -9,8 +10,8 @@ import os
 import re
 import shutil
 import stat
+import struct
 import tarfile
-import tempfile
 import zipfile
 import zlib
 from dataclasses import dataclass, field
@@ -141,15 +142,18 @@ TAR_STREAM = {"tar.zst": "zst", "tar.lz4": "lz4"}  # tar inside a compressor tar
 ZIP_BASED = {"zipx", "jar", "war", "ear", "apk", "aab", "xpi", "vsix", "nupkg", "whl", "appx", "msix",
              "ipa", "crx"}
 
+# Read by packport (pure Python): RAR (4 and 5, solid, volumes), discs (ISO 9660, UDF), installers
+# and packages, old archivers, disk images and the file systems on them, DMG
+PACKPORT_EXTRACT = {"rar", "cbr", "r00", "iso", "udf", "cab", "arj", "lzh", "wim", "rpm", "deb", "xar", "pkg",
+                    "ar", "001", "squashfs", "dmg", "vhd", "vhdx", "vmdk", "vdi", "qcow2", "img", "apfs", "hfs"}
+BOOKPORT_EXTRACT = {"chm", "lit"}  # the files inside a help file or a Microsoft Reader book
+MSI_EXTRACT = {"msi", "msp"}  # Windows Installer: OLE streams, with the CABs inside unpacked
 NATIVE_EXTRACT = ({"zip", "cbz", "7z", "cb7", "tar", "cbt", "cpio"} | set(TAR_MODE) | set(TAR_STREAM)
-                  | set(STREAM) | ZIP_BASED)
-SEVENZIP_EXTRACT = {"rar", "cbr", "iso", "cab", "arj", "lzh", "dmg", "wim", "rpm", "deb", "msi", "msp", "vhd", "vhdx", "vmdk", "vdi", "qcow2", "img", "squashfs", "udf",
-                    "apfs", "hfs", "xar", "pkg", "ar", "001", "r00", "chm", "lit"}
-EXTRACTABLE = NATIVE_EXTRACT | SEVENZIP_EXTRACT
+                  | set(STREAM) | ZIP_BASED | PACKPORT_EXTRACT | BOOKPORT_EXTRACT | MSI_EXTRACT)
+EXTRACTABLE = NATIVE_EXTRACT
 
-COMPRESS_OUT = {"zip", "7z", "iso", "rar", "cpio"} | set(TAR_MODE) | set(TAR_STREAM) | set(STREAM)
+COMPRESS_OUT = {"zip", "7z", "iso", "rar", "cpio", "wim"} | set(TAR_MODE) | set(TAR_STREAM) | set(STREAM)
 FOLDER_OUT = COMPRESS_OUT - set(STREAM)
-SEVENZIP_OUT = {"wim"}  # written by 7-Zip itself
 # A comic is an archive of page images; this is the container each one is meant to be
 COMIC_CONTAINER = {"cbz": "zip", "cbr": "rar", "cb7": "7z", "cbt": "tar"}
 CONTAINER = COMIC_CONTAINER | {f: "zip" for f in ZIP_BASED}
@@ -164,7 +168,8 @@ def compress(src: Path, dst: Path, fmt: str) -> None:
         if src.is_dir():
             arcname = ""
     if fmt == "zip":
-        with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        # strict_timestamps=False: a file dated before 1980 (from an old tar or RPM) gets 1980, ZIP's first date
+        with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=9, strict_timestamps=False) as zf:
             if src.is_dir():
                 if arcname:
                     zf.write(src, arcname)
@@ -200,8 +205,9 @@ def compress(src: Path, dst: Path, fmt: str) -> None:
     elif fmt == "cpio":
         import packport
         _packport(packport.write_cpio, dst, src, arcname)
-    elif fmt in SEVENZIP_OUT:
-        _sevenzip_add(src, dst, fmt)
+    elif fmt == "wim":
+        import packport
+        _packport(packport.write_wim, dst, src, arcname)
     else:
         raise ConversionError(f"Can't create {fmt}")
 
@@ -232,11 +238,6 @@ def _write_rar(src: Path, dst: Path, arcname: str) -> None:
         return
     import packport
     _packport(packport.write_rar, dst, src, arcname)
-
-
-def _sevenzip_add(src: Path, dst: Path, fmt: str) -> None:
-    exe = engines.require("7zip")
-    engines.run([exe, "a", f"-t{fmt}", "-bd", "-y", str(dst), str(src)])
 
 
 # ---- ISO 9660 (+ Joliet for Windows, Rock Ridge for Linux/macOS: both keep the real names)
@@ -304,7 +305,6 @@ def _write_iso(src: Path, dst: Path) -> None:
 # link that slipped through.
 
 ENCRYPTED = "{} is password-protected; ConvertAll can't open encrypted archives"
-SEVENZIP_SAFE = (25, 0)  # 7-Zip before 25.00 can write through links (CVE-2025-11001/11002)
 
 
 @dataclass
@@ -325,31 +325,35 @@ class _Report:
 
 def extract_to(src: Path, dest: Path, fmt: str, notes: list[str] | None = None) -> None:
     """Unpack src into the folder dest. notes, when given, gets a line for anything skipped or
-    renamed and any advice (an old 7-Zip)."""
+    renamed."""
     import py7zr
     dest.mkdir(parents=True, exist_ok=True)
     dest = dest.resolve()
     fmt = CONTAINER.get(fmt, fmt)
     report = _Report()
-    if fmt in SEVENZIP_EXTRACT:
-        _sevenzip_extract(src, dest, report)
+    if fmt in PACKPORT_EXTRACT:
+        _extract_packport(src, dest, Budget(dest, src.name), report)
+    elif fmt in BOOKPORT_EXTRACT:
+        _extract_bookport(src, dest, fmt, Budget(dest, src.name), report)
+    elif fmt in MSI_EXTRACT:
+        _extract_msi(src, dest, Budget(dest, src.name), report)
     else:
         try:
             _native_extract(src, dest, fmt, report)
-        except Refused:
+        except (Refused, cancel.Cancelled):  # stopped is stopped: not damaged, nor one for packport
             raise
         except (NotImplementedError, ConversionError, py7zr.exceptions.ArchiveError, zipfile.BadZipFile,
                 tarfile.TarError, zstd.ZstdError, lzma.LZMAError, zlib.error, EOFError, RuntimeError,
                 OSError) as exc:
-            # Unusual methods (Deflate64, PPMd, BCJ2...) or damage -> 7-Zip, if it's there, may
-            # still get the files out
-            if not engines.available("7zip"):
+            # zipfile and py7zr don't do every method (Deflate64, PPMd, BCJ2...) or read damaged
+            # archives; packport does both
+            if fmt not in ("zip", "7z"):
                 why = str(exc) or type(exc).__name__
                 raise ConversionError(f"Couldn't extract {src.name}; it looks damaged ({why})") from exc
             shutil.rmtree(dest, ignore_errors=True)
             dest.mkdir(parents=True)
             report = _Report()
-            _sevenzip_extract(src, dest, report)
+            _extract_packport(src, dest, Budget(dest, src.name), report)
     report.skipped += sweep(dest)
     if notes is not None:
         notes.extend(report.lines())
@@ -455,7 +459,9 @@ def _extract_7z(src: Path, dest: Path, budget: Budget, report: _Report) -> None:
             cancel.check()
             budget.take(len(s))  # py7zr itself stops each file at its declared size
             self.n += len(s)
-            return self.f.write(s)
+            n = self.f.write(s)
+            cancel.moved(len(s))
+            return n
 
         def read(self, size=None) -> bytes:
             return b""
@@ -488,6 +494,10 @@ def _extract_7z(src: Path, dest: Path, budget: Budget, report: _Report) -> None:
         with py7zr.SevenZipFile(src) as z:
             if z.needs_password():
                 raise Refused(ENCRYPTED.format(src.name))
+            if any("ppmd" in m.lower() for m in z.archiveinfo().method_names):
+                # py7zr's PPMd decoder (pyppmd) crashes the program when it's freed part-way
+                # through, which is what Cancel does: packport reads these (extract_to falls back)
+                raise NotImplementedError("PPMd")
             infos = z.list()
             budget.check(sum(i.uncompressed or 0 for i in infos if i.is_file))
             targets = []
@@ -522,91 +532,158 @@ def _extract_cpio(src: Path, dest: Path, budget: Budget, report: _Report) -> Non
 
     try:  # streamed; packport applies the same name rules and never writes links
         packport.extract_cpio(src, dest, max_size=max(budget.left, 0), on_skip=skipped)
+    except packport.PackportError:  # old binary or odc CPIO: packport's general reader has those
+        shutil.rmtree(dest, ignore_errors=True)
+        dest.mkdir(parents=True)
+        _extract_packport(src, dest, budget, report)
+
+
+def _extract_packport(src: Path, dest: Path, budget: Budget, report: _Report) -> None:
+    """Every format packport reads, through one loop: the declared total checked up front, each
+    file stopped at its declared size, names made safe and clashes renamed, links and special
+    files left out, encrypted archives refused."""
+    import packport
+    namer = Namer()
+    try:
+        with packport.open(src) as archive:
+            files = [m for m in archive.members if m.is_file]
+            if any(m.encrypted for m in files):
+                raise Refused(ENCRYPTED.format(src.name))
+            budget.check(sum(m.size for m in files))
+            for m in archive.members:
+                if m.is_dir:
+                    _place(namer, dest, m.name, True, report)
+                elif not m.is_file:
+                    report.skipped += 1  # links, devices
+            for m, stream in archive.files():
+                cancel.check()
+                target = _place(namer, dest, m.name, False, report)
+                if target is None:
+                    continue
+                copy_capped(stream, target, m.size, budget, m.name)
+                if m.mtime:
+                    with contextlib.suppress(OSError, ValueError, OverflowError):
+                        os.utime(target, (m.mtime, m.mtime))
+    except packport.EncryptedError:
+        raise Refused(ENCRYPTED.format(src.name)) from None
     except packport.PackportError as exc:
-        raise ConversionError(str(exc)) from None  # old binary/odc CPIO: 7-Zip takes over
+        raise ConversionError(f"Couldn't extract {src.name}: {_ours(exc)}{_lone_piece(src)}") from None
+    report.renamed += namer.renamed
 
 
-def _sevenzip_version(exe: str) -> tuple[int, int]:
-    banner = engines.run([exe, "i"]).stdout[:300]
-    m = re.search(r"7-Zip(?: \([a-z]\))? (\d+)\.(\d+)", banner)
-    return (int(m[1]), int(m[2])) if m else (0, 0)
+def _ours(exc: Exception) -> str:
+    """packport's message in ConvertAll's words: it says "packport doesn't ..." about itself."""
+    msg = re.sub(r"\bpackport\b", "ConvertAll", str(exc))
+    if msg == "ConvertAll doesn't know what kind of archive this is":
+        msg += "; it may be damaged"
+    return msg
 
 
-def _sevenzip_extract(src: Path, dest: Path, report: _Report) -> None:
-    """7-Zip, after a look at the listing: names that climb out and every link (symbolic or
-    hard) are excluded up front, and the declared sizes must fit on the disk. 7-Zip makes the
-    other names safe for Windows itself, and -aou renames clashes instead of overwriting."""
-    exe = engines.require("7zip")
-    if _sevenzip_version(exe) < SEVENZIP_SAFE:
-        report.notes.append("Your 7-Zip is older than 25.00; updating it is recommended "
-                            "(links were left out either way)")
-    listing = _sevenzip_list(exe, src)
-    exclude, total = [], 0
-    for e in listing:
-        path = e.get("Path", "")
-        link = (any(e.get(k) for k in ("Symbolic Link", "Hard Link", "Link"))
-                or re.search(r"(^|\s)l[r-][w-]", e.get("Attributes", "")))
-        if link or safe_name(path) is None:
-            exclude.append(path.replace("\\", "/"))
-            report.skipped += 1
-        elif e.get("Folder") != "+":
-            total += int(e.get("Size") or 0)
-    Budget(dest, src.name).check(total)
-    fd, listfile = tempfile.mkstemp(suffix=".txt", prefix="convertall-")
+def _lone_piece(src: Path) -> str:
+    """A hint when a damaged archive is the first piece of a split whose other pieces aren't beside it."""
+    stem, _, number = src.name.rpartition(".")
+    if not (number.isdigit() and len(number) == 3 and int(number) <= 1):
+        return ""
+    if src.with_name(f"{stem}.{int(number) + 1:03d}").is_file():
+        return ""
+    return (f". It may be one piece of a split archive: put the other pieces (.{int(number) + 1:03d}, "
+            f".{int(number) + 2:03d}, ...) in the same folder and try again")
+
+
+def _extract_bookport(src: Path, dest: Path, fmt: str, budget: Budget, report: _Report) -> None:
+    """The pages, pictures and indexes inside a CHM help file or a LIT book."""
+    import bookport
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("\n".join(exclude))
-        engines.run([exe, "x", "-y", "-aou", "-bd", "-p-", "-scsUTF-8", f"-x@{listfile}",
-                     f"-o{dest}", str(src)])
-    except ConversionError as exc:
-        raise _sevenzip_error(src, exc) from None
-    finally:
-        os.unlink(listfile)
+        entries = bookport.unpack(src, fmt)
+    except bookport.BookportError as exc:
+        if type(exc).__name__ == "DRMError":
+            raise Refused(f"{src.name} is DRM-protected; ConvertAll can't open it") from None
+        raise ConversionError(str(exc)) from None
+    budget.check(sum(len(data) for _, data in entries))
+    namer = Namer()
+    for name, data in entries:
+        cancel.check()
+        target = _place(namer, dest, name, False, report)
+        if target is not None:
+            copy_capped(io.BytesIO(data), target, len(data), budget, name)
+    report.renamed += namer.renamed
 
 
-def _sevenzip_error(src: Path, exc: ConversionError) -> ConversionError:
-    """7-Zip's complaint, without the paths and headings around it."""
-    if re.search(r"Wrong password|encrypted", str(exc), re.IGNORECASE):
-        return Refused(ENCRYPTED.format(src.name))
-    said = []
-    for line in str(exc).replace(str(src), "").splitlines():
-        line = re.sub(r"^(Open )?ERROR(S)?:?", "", line).strip(" :")
-        if line and line not in said:
-            said.append(line)
-    return ConversionError(f"Couldn't extract {src.name}: {'; '.join(said) or 'not an archive 7-Zip can open'}")
+# Windows Installer packs stream names two characters at a time into one code point
+_MSI_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._"
 
 
-def _sevenzip_list(exe: str, src: Path) -> list[dict[str, str]]:
-    """7-Zip's technical listing: one dict per entry ("Path", "Size", "Folder", "Attributes",
-    "Symbolic Link"...)."""
+def _msi_name(name: str) -> str:
+    out = []
+    for ch in name:
+        c = ord(ch)
+        if 0x3800 <= c < 0x4800:
+            c -= 0x3800
+            out += [_MSI_CHARS[c & 0x3F], _MSI_CHARS[c >> 6 & 0x3F]]
+        elif 0x4800 <= c < 0x4840:
+            out.append(_MSI_CHARS[c - 0x4800])
+        elif c == 0x4840:
+            out.append("!")  # the installer's own tables
+        elif c < 0x20:
+            out.append(f"[{c}]")  # a control character, as in "[5]SummaryInformation"
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _extract_msi(src: Path, dest: Path, budget: Budget, report: _Report) -> None:
+    """A Windows Installer package (or patch): its streams, under their real names; a CAB among
+    them (where the installed files are) is unpacked into a folder of its own name."""
+    import olefile
+    import packport
     try:
-        out = engines.run([exe, "l", "-slt", "-ba", "-p-", "-sccUTF-8", str(src)]).stdout
-    except ConversionError as exc:
-        raise _sevenzip_error(src, exc) from None
-    entries, cur = [], {}
-    for line in out.splitlines():
-        if not line.strip():
-            if cur:
-                entries.append(cur)
-            cur = {}
-        elif " = " in line:
-            key, _, value = line.partition(" = ")
-            if key == "Path" and "Path" in cur:  # -ba listings may not leave a blank line
-                entries.append(cur)
-                cur = {}
-            cur[key.strip()] = value.strip()
-    if cur:
-        entries.append(cur)
-    return entries
+        ole = olefile.OleFileIO(str(src))
+    except (OSError, ValueError) as exc:
+        raise ConversionError(f"Couldn't open {src.name} as a Windows Installer package ({exc})") from None
+    namer = Namer()
+
+    def read(path) -> bytes:
+        try:
+            return ole.openstream(path).read()
+        except (OSError, ValueError, IndexError, struct.error) as exc:  # olefile on a cut-short or damaged file
+            raise ConversionError(f"Couldn't extract {src.name}: the package is damaged ({exc})") from None
+
+    with ole:
+        try:
+            streams = ole.listdir(streams=True, storages=False)
+            sizes = sum(ole.get_size(s) for s in streams)
+        except (OSError, ValueError, IndexError, struct.error) as exc:
+            raise ConversionError(f"Couldn't extract {src.name}: the package is damaged ({exc})") from None
+        budget.check(sizes)
+        for path in streams:
+            cancel.check()
+            name = "/".join(_msi_name(p) for p in path)
+            data = read(path)
+            if data[:4] == b"MSCF":
+                folder = _place(namer, dest, name.removesuffix(".cab") or "cab", True, report)
+                if folder is None:
+                    continue
+                try:
+                    with packport.open(data) as cab:
+                        inner = Namer()
+                        for m, stream in cab.files():
+                            target = _place(inner, folder, m.name, False, report)
+                            if target is not None:
+                                copy_capped(stream, target, m.size, budget, m.name)
+                        report.renamed += inner.renamed
+                except packport.PackportError as exc:
+                    raise ConversionError(f"Couldn't extract {src.name}: {name}: {_ours(exc)}") from None
+                continue
+            target = _place(namer, dest, name, False, report)
+            if target is not None:
+                copy_capped(io.BytesIO(data), target, len(data), budget, name)
+    report.renamed += namer.renamed
 
 
 @converter(inputs={"*"}, outputs=COMPRESS_OUT, terminal=True)
 @converter(inputs={"folder"}, outputs=FOLDER_OUT, terminal=True)
 def compress_convert(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     compress(src, dst, dst_fmt)
-
-
-converter(inputs={"*", "folder"}, outputs=SEVENZIP_OUT, engine="7zip", terminal=True)(compress_convert)
 
 
 def repack(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
@@ -620,14 +697,9 @@ def repack(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     compress(root, dst, dst_fmt)
 
 
-# Only real archives repack; a .chm or .lit (also readable by 7-Zip) is converted as an ebook
+# Only real archives repack; a .chm or .lit is converted as an ebook
 _NATIVE_ARCHIVES = {f for f in NATIVE_EXTRACT - COMICS - set(STREAM) if category(f) == "Archive"}
-_SEVENZIP_ARCHIVES = {f for f in SEVENZIP_EXTRACT - COMICS if category(f) == "Archive"}
 converter(inputs=_NATIVE_ARCHIVES, outputs=FOLDER_OUT, terminal=True)(repack)
-converter(inputs=_NATIVE_ARCHIVES | _SEVENZIP_ARCHIVES, outputs=SEVENZIP_OUT, engine="7zip",
-          terminal=True)(repack)
 converter(inputs=set(STREAM), outputs=COMPRESS_OUT, terminal=True)(repack)
-converter(inputs=_SEVENZIP_ARCHIVES, outputs=FOLDER_OUT, engine="7zip", terminal=True)(repack)
 # comic -> comic keeps the pages, just in another container
-converter(inputs=COMICS - {"cbr"}, outputs=COMICS)(repack)
-converter(inputs={"cbr"}, outputs=COMICS - {"cbr"}, engine="7zip")(repack)
+converter(inputs=COMICS, outputs=COMICS)(repack)

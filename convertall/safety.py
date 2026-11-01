@@ -112,9 +112,11 @@ class Budget:
                        f"free on that drive")
 
     def check(self, total: int) -> None:
-        """Refuse up front when the archive's own sizes already don't fit."""
+        """Refuse up front when the archive's own sizes already don't fit (and tell the window
+        how much is coming)."""
         if total > self.left:
             raise self._full(total)
+        cancel.expect(total)
 
     def take(self, n: int) -> None:
         self.left -= n
@@ -134,6 +136,7 @@ def copy_capped(fin, target: Path, limit: int | None, budget: Budget, label: str
                               f"made to fill the disk)")
             budget.take(len(chunk))
             fout.write(chunk)
+            cancel.moved(len(chunk))
 
 
 INNER_LIMIT = 512 << 20  # one compressed file inside another (.svgz, .kmz): more is a bomb

@@ -14,3 +14,4 @@ app/
 .DS_Store
 .idea/
 .cache/
+packaging/launcher/target/

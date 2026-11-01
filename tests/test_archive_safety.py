@@ -22,8 +22,6 @@ from convertall.converters import archives
 from convertall.errors import ConversionError
 from convertall.pipeline import convert, extract
 
-from .conftest import needs
-
 TAG = uuid.uuid4().hex[:8]  # names an escape would leave at the drive root, unique to this run
 
 
@@ -155,8 +153,7 @@ def test_zip_symlink_entry_is_left_out(fence):
     assert files == {"ok.txt": b"ok"} and notes[0].startswith("1 entry skipped")
 
 
-def test_zip_encrypted_is_refused(fence, without_engine):
-    without_engine("7zip")  # the built-in reader must say so itself, not fall back
+def test_zip_encrypted_is_refused(fence):
     arc = _zip(fence.arc("locked.zip"), [("secret.txt", b"x" * 40), ("b.txt", b"b")])
     data = bytearray(arc.read_bytes())
     for sig, flags in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):  # set "encrypted" in both headers
@@ -166,13 +163,8 @@ def test_zip_encrypted_is_refused(fence, without_engine):
     fence.refused(arc, "password-protected")
 
 
-@pytest.mark.parametrize("seven_zip", [True, False], ids=["with-7zip", "without-7zip"])
 @pytest.mark.parametrize("damage", ["truncated", "bad-crc"])
-def test_zip_damaged(fence, without_engine, seven_zip, damage):
-    if not seven_zip:
-        without_engine("7zip")
-    elif not engines.available("7zip"):
-        pytest.skip("7zip not installed")
+def test_zip_damaged(fence, damage):
     arc = _zip(fence.arc("bad.zip"), [("a.txt", b"hello world " * 200), ("b.txt", b"b" * 3000)])
     data = bytearray(arc.read_bytes())
     if damage == "truncated":
@@ -227,12 +219,7 @@ def test_tar_hostile_names_and_links(fence, mode):
     assert not (fence.tmp / "outside").exists() and not (fence.tmp / "outside_hl").exists()
 
 
-@pytest.mark.parametrize("seven_zip", [True, False], ids=["with-7zip", "without-7zip"])
-def test_tar_truncated(fence, without_engine, seven_zip):
-    if not seven_zip:
-        without_engine("7zip")
-    elif not engines.available("7zip"):
-        pytest.skip("7zip not installed")
+def test_tar_truncated(fence):
     arc = _tar(fence.arc("cut.tar.gz"), [("a.bin", os.urandom(50_000)), ("b.bin", os.urandom(50_000))], "w:gz")
     arc.write_bytes(arc.read_bytes()[:30_000])
     with pytest.raises(ConversionError) as err:
@@ -275,13 +262,8 @@ def test_7z_hostile_names(fence):
     assert notes[0].startswith("3 entries skipped")
 
 
-@pytest.mark.parametrize("seven_zip", [True, False], ids=["with-7zip", "without-7zip"])
 @pytest.mark.parametrize("damage", ["truncated", "bad-crc"])
-def test_7z_damaged(fence, without_engine, seven_zip, damage):
-    if not seven_zip:
-        without_engine("7zip")
-    elif not engines.available("7zip"):
-        pytest.skip("7zip not installed")
+def test_7z_damaged(fence, damage):
     import py7zr
     arc = fence.arc("bad.7z")
     with py7zr.SevenZipFile(arc, "w", filters=[{"id": py7zr.FILTER_COPY}]) as z:
@@ -338,47 +320,83 @@ def test_repack_leaves_hostile_names_out(fence):
     assert files == {"ok.txt": b"ok", "b.txt": b"b"}
 
 
-# ---- external 7-Zip (rar, iso, rpm... and the fallback)
+# ---- packport (rar, iso, cab, rpm, disk images... and the zip/7z fallback)
 
-@needs("7zip")
-def test_7zip_link_then_write_through_it(fence):
-    """The CVE-2025-11001 pattern: a link that points out, then a file written through it."""
-    arc = _tar(fence.arc("cve.tar"), [("esc", tarfile.SYMTYPE, "../../outside"),
-                                      ("esc/pwned.txt", b"pwned"), ("hl", tarfile.LNKTYPE, "../../outside_hl"),
+def _rar(path: Path, entries, password: bool = False) -> Path:
+    """A stored RAR 4 with names exactly as given: (name, data) for files, (name, "link", target)
+    for Unix symbolic links. password sets every file's "encrypted" flag."""
+    from packport import rar as r
+    out = bytearray(r.MARK + r._block(r.HEAD_MAIN, 0, bytes(6)))
+    for entry in entries:
+        name, data = entry[0], entry[1] if len(entry) == 2 else entry[2].encode()
+        host, attr = (3, stat.S_IFLNK | 0o777) if len(entry) == 3 else (r.HOST_WIN32, r.ATTR_ARCHIVE)
+        raw, unicode = r.encode_name(name)
+        flags = r.LONG_BLOCK | (r.FHD_UNICODE if unicode else 0) | (0x04 if password else 0)
+        body = r._FILE.pack(len(data), len(data), host, zlib.crc32(data), 0x21 << 16, 29, r.METHOD_STORE,
+                            len(raw), attr)
+        out += r._block(r.HEAD_FILE, flags, body + raw) + data
+    path.write_bytes(bytes(out + r._block(r.HEAD_END, r.SKIP_IF_UNKNOWN, b"")))
+    return path
+
+
+def test_packport_link_then_write_through_it(fence):
+    """The CVE-2025-11001 pattern: a link that points out, then a file written through it. The
+    link is left out, so the file lands in a real folder of that name inside the extraction."""
+    arc = _rar(fence.arc("cve.rar"), [("esc", "link", "../../outside"), ("esc/pwned.txt", b"pwned"),
                                       ("ok.txt", b"ok")])
-    files, notes = fence.extract(arc, fmt="rpm")  # any format 7-Zip handles; it reads the content
-    assert files == {"ok.txt": b"ok"}  # esc/pwned.txt goes with the excluded link
-    assert notes[0].startswith("2 entries skipped")
+    files, notes = fence.extract(arc)
+    assert files == {"esc/pwned.txt": b"pwned", "ok.txt": b"ok"}
+    assert notes[0].startswith("1 entry skipped")
     assert not (fence.tmp / "outside").exists()
 
 
-@needs("7zip")
-def test_7zip_hostile_names(fence):
-    files, notes = fence.extract(_zip(fence.arc("names.zip"), HOSTILE_ZIP_NAMES), fmt="rar")
-    assert "ok.txt" in files and "_CON.txt" in files and "dir/a.txt_ads" in files
-    assert not any("up" in name for name in files)
-    assert notes[0].startswith("3 entries skipped")
+def test_packport_hostile_names(fence):
+    files, notes = fence.extract(_rar(fence.arc("names.rar"), HOSTILE_ZIP_NAMES))
+    assert files == {f"{TAG}-abs.txt": b"abs", f"{TAG}-drive.txt": b"drive", "_CON.txt": b"con",
+                     "_nul": b"nul", "dir/a.txt_ads": b"ads", "name_": b"dot", "ok.txt": b"fine"}
+    assert notes == ["3 entries skipped (links, or names that would land outside the folder)"]
 
 
-@needs("7zip")
-def test_7zip_password_does_not_hang(fence):
-    src = fence.tmp / "secret.txt"
-    src.write_text("secret")
-    arc = fence.arc("locked.zip")
-    subprocess.run([engines.find("7zip"), "a", "-pSECRET", "-bd", str(arc), str(src)], check=True,
-                   capture_output=True)
-    src.unlink()
-    fence.before = _snapshot(fence.tmp)
-    fence.refused(arc, "password-protected", fmt="rar")
-    fence.refused(arc, "password-protected")  # the built-in reader says so too
+def test_packport_duplicates_are_renamed(fence):
+    files, notes = fence.extract(_rar(fence.arc("dups.cbr"), [("a.txt", b"1"), ("a.txt", b"2"), ("d/f", b"3")]))
+    assert files == {"a.txt": b"1", "a (1).txt": b"2", "d/f": b"3"}
+    assert any("renamed" in n for n in notes)
 
 
-@needs("7zip")
-@pytest.mark.parametrize("version, warned", [((24, 9), True), ((25, 1), False)])
-def test_old_7zip_gets_a_note(fence, monkeypatch, version, warned):
-    monkeypatch.setattr(archives, "_sevenzip_version", lambda exe: version)
-    _, notes = fence.extract(_zip(fence.arc("a.zip"), [("a.txt", b"a")]), fmt="rar")
-    assert any("older than 25.00" in n for n in notes) == warned
+def test_packport_password_is_refused(fence):
+    fence.refused(_rar(fence.arc("locked.rar"), [("secret.txt", b"x" * 40)], password=True), "password-protected")
+
+
+def test_packport_cut_short(fence):
+    arc = _rar(fence.arc("cut.rar"), [("a.bin", os.urandom(50_000)), ("b.bin", os.urandom(50_000))])
+    arc.write_bytes(arc.read_bytes()[:60_000])
+    with pytest.raises(ConversionError, match="Couldn't extract cut.rar"):
+        extract(arc, fence.out)
+    fence.check(arc)
+
+
+def test_packport_bigger_than_the_free_space_is_refused(fence, monkeypatch):
+    arc = _rar(fence.arc("big.rar"), [("a.bin", bytes(3 << 20)), ("b.bin", bytes(3 << 20))])
+    monkeypatch.setattr(safety.shutil, "disk_usage", lambda p: _usage(safety.MARGIN + (4 << 20)))
+    fence.refused(arc, r"unpacks to 6\.0 MB, more than the")
+
+
+def test_zip_with_deflate64_falls_back_to_packport(fence):
+    import packport
+    arc = fence.arc("d64.zip")
+    _zip(arc, [("a.txt", b"hello " * 1000)])
+    data = bytearray(arc.read_bytes())
+    for sig, at in ((b"PK\x03\x04", 8), (b"PK\x01\x02", 10)):  # call it Deflate64: zipfile gives up
+        i = data.index(sig)
+        data[i + at:i + at + 2] = struct.pack("<H", 9)
+    arc.write_bytes(bytes(data))
+    with zipfile.ZipFile(arc) as z, pytest.raises(NotImplementedError):
+        z.read("a.txt")
+    with packport.open(arc) as a:
+        assert a.members[0].name == "a.txt"  # stored, so Deflate64 reads it as raw Deflate would
+    with pytest.raises(ConversionError):  # the data isn't Deflate64: packport says it's damaged
+        extract(arc, fence.out)
+    fence.check(arc)
 
 
 def test_sweep_removes_links_and_junctions(tmp_path):
@@ -415,3 +433,79 @@ def test_safe_name():
     assert safety.safe_name("con ") == "_con_" and safety.safe_name("x/aux.tar.gz") == "x/_aux.tar.gz"
     assert safety.safe_name('a<b>c"d|e?f*g\x01') == "a_b_c_d_e_f_g_"
     assert safety.safe_name("console.txt") == "console.txt"
+
+
+def test_no_7zip_anywhere():
+    """ConvertAll reads every archive itself: no converter, engine or extraction uses 7-Zip."""
+    from convertall import registry
+    registry._ensure_loaded()
+    edges = [e for es in registry._edges.values() for e in es] if isinstance(registry._edges, dict) else list(registry._edges)
+    assert not [e for e in edges if e.engine == "7zip"]
+    assert "7zip" not in engines.ENGINES
+    assert archives.EXTRACTABLE == archives.NATIVE_EXTRACT
+
+
+def test_the_7zip_guard_stops_a_test_that_starts_it():
+    with pytest.raises(AssertionError, match="started 7-Zip"):
+        subprocess.Popen(["C:/Program Files/7-Zip/7z.exe", "i"])
+    with pytest.raises(AssertionError, match="started 7-Zip"):
+        subprocess.run('"C:/Program Files/7-Zip/7z.exe" i', check=False)
+
+
+@pytest.mark.parametrize("cut", [12850, 14609])
+def test_msi_cut_short(fence, cut):
+    """A cut-short Windows Installer package fails as damaged, not with olefile's own error
+    (it gave "bytes length not a multiple of item size")."""
+    from .samples import Samples
+    sample = Samples(fence.tmp / "arcs" / "samples")("msi")
+    arc = fence.arc("cut.msi")
+    arc.write_bytes(sample.read_bytes()[:cut])
+    fence.refused(arc, "damaged")
+
+
+def test_damaged_archive_message_names_convertall_not_its_library(fence):
+    """packport's messages say "packport doesn't ..."; ConvertAll's users never heard of it."""
+    arc = fence.arc("garbled.cab")
+    arc.write_bytes(bytes(range(256)) * 8)
+    with pytest.raises(ConversionError) as err:
+        extract(arc, fence.out, src_fmt="cab")
+    assert "packport" not in str(err.value)
+    assert "may be damaged" in str(err.value)
+    fence.check(arc)
+
+
+CANCEL_PPMD = r'''
+import gc, random, sys
+from pathlib import Path
+import py7zr
+from convertall import cancel
+from convertall.converters.archives import extract_to
+work = Path(sys.argv[1])
+rng = random.Random(7)
+text = work / "big.txt"
+text.write_text(" ".join(rng.choice(["alpha", "beta", "gamma", "delta"]) for _ in range(5_000_000)))
+arc = work / "ppmd.7z"
+with py7zr.SevenZipFile(arc, "w", filters=[{"id": py7zr.FILTER_PPMD, "order": 6, "mem": 24}]) as z:
+    z.write(text, "big.txt")
+import threading
+token = cancel.Token()
+threading.Timer(0.3, token.cancel).start()  # Cancel part-way through (it takes seconds to unpack)
+try:
+    with cancel.using(token):
+        extract_to(arc, work / "out", "7z")
+except cancel.Cancelled:
+    print("stopped")
+gc.collect()  # what the stopped extraction left: pyppmd crashed here, freeing its half-used decoder
+print("ok")
+'''
+
+
+def test_cancelling_a_ppmd_7z_does_not_crash(tmp_path):
+    """py7zr's PPMd decoder (pyppmd) crashes the program when it's freed part-way through a
+    stream, which is what Cancel does: a PPMd 7z is read by packport instead."""
+    import subprocess
+    import sys
+    p = subprocess.run([sys.executable, "-c", CANCEL_PPMD, str(tmp_path)], capture_output=True, text=True, check=False,
+                       timeout=300)
+    assert p.returncode == 0, (p.returncode, p.stdout, p.stderr[-500:])
+    assert p.stdout.split() == ["stopped", "ok"]
