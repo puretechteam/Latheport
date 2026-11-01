@@ -79,8 +79,9 @@ filterwarnings = [
     # read and write correctly, and the DAE tests fail the day a NumPy release removes it
     "ignore:Setting the shape on a NumPy array:DeprecationWarning:collada",
     # FFmpeg writes .ssa files with ASS-style fields; pysubs2 warns and takes the default
-    # alignment, which is the one those files mean
-    "ignore:Failed to parse alignment:pysubs2.warnings.SubtitleAttributeWarning",
+    # alignment, which is the one those files mean (no category: pysubs2.warnings is new in 1.9,
+    # which needs Python 3.12, so naming its class breaks the suite on 3.11)
+    "ignore:Failed to parse alignment::pysubs2",
 ]
 
 [tool.ruff]
