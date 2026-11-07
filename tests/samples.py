@@ -162,6 +162,13 @@ MARKUP_TEXT = {
     "org": "* Heading\n\n" + TEXT + ", /emphasis/.\n\n- one\n- two\n",
     "adoc": "= Sample\n\n== Heading\n\n" + TEXT + ", _emphasis_.\n\n* one\n* two\n",
     "wiki": "== Heading ==\n\n" + TEXT + ", ''emphasis''.\n\n* one\n* two\n",
+    "typ": "= Heading\n\n" + TEXT + ", _emphasis_.\n\n- one\n- two\n",
+    "textile": "h1. Heading\n\n" + TEXT + ", _emphasis_.\n\n* one\n* two\n",
+    "man": ".TH SAMPLE 1\n.SH HEADING\n" + TEXT + ", \\fIemphasis\\fR.\n.IP \\(bu 2\none\n.IP \\(bu 2\ntwo\n",
+    "dbk": '<?xml version="1.0" encoding="utf-8"?>\n<article xmlns="http://docbook.org/ns/docbook" version="5.0">'
+           "<title>Sample</title><section><title>Heading</title><para>" + TEXT + ", <emphasis>emphasis</emphasis>."
+           "</para><itemizedlist><listitem><para>one</para></listitem><listitem><para>two</para></listitem>"
+           "</itemizedlist></section></article>\n",
 }
 PS = f"%!PS-Adobe-3.0\n/Helvetica findfont 24 scalefont setfont 72 700 moveto ({TEXT}) show\n" \
      "newpath 72 600 moveto 300 450 lineto 72 450 lineto closepath stroke\nshowpage\n"
@@ -608,11 +615,16 @@ def _video(fmt: str, path: Path) -> Path | None:
     return _ffmpeg([*AV_IN, *args, "-shortest"], path)
 
 
-def _magick(src: Path, path: Path) -> Path | None:
-    exe = engines.find("imagemagick")
-    if not exe:
-        return None
-    engines.run([exe, str(src), str(path)], timeout=120)
+def _pixport(src: Path, path: Path, fmt: str) -> Path:
+    import numpy as np
+    import pixport
+    with Image.open(src) as im:
+        px = np.asarray(im.convert("RGB"), np.float32) / 255
+    if fmt in ("exr", "hdr"):  # light, not screen values
+        img = pixport.Image(pixport.image.srgb_to_linear(px), "linear", {})
+    else:
+        img = pixport.Image(px, "srgb", {"bits": 8})
+    pixport.write(img, path, fmt)
     return path
 
 
@@ -666,8 +678,8 @@ class Samples:
         if fmt in ("ps", "eps"):  # vector PostScript with real text (Pillow's EPS would be a bitmap)
             p.write_text(EPS if fmt == "eps" else PS, encoding="ascii")
             return p
-        if fmt in ("jxl", "exr", "hdr"):  # ImageMagick reads these for ConvertAll, and writes them too
-            return _magick(self("png"), p)
+        if fmt in ("jxl", "exr", "hdr"):  # pixport reads these for ConvertAll, and writes them too
+            return _pixport(self("png"), p, fmt)
         writer = {"dng": write_dng, "xps": write_xps, "oxps": lambda q: write_xps(q, open_xps=True),
                   "wpd": write_wpd, "vsdx": write_vsdx, "chm": write_chm}.get(fmt)
         if writer:  # formats nothing here can save, made by hand from their specifications
@@ -676,12 +688,8 @@ class Samples:
         if fmt in images.WRITE - {"pdf"}:
             images.save_image(images.prepare(img, fmt), p, fmt)
             return p
-        if fmt == "djvu":
-            c44 = engines.find("djvulibre") and Path(engines.find("djvulibre")).with_name("c44.exe")
-            if not c44 or not c44.exists():
-                return None
-            img.convert("RGB").save(self.dir / "_djvu.ppm")
-            engines.run([c44, "_djvu.ppm", p.name], cwd=str(self.dir))
+        if fmt == "djvu":  # one page with a hidden text layer, made with DjVuLibre's c44 and djvused
+            shutil.copyfile(Path(__file__).parent / "data" / "sample.djvu", p)
             return p
         if fmt == "svg":
             p.write_text(SVG, encoding="utf-8")

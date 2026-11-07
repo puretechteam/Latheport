@@ -14,7 +14,7 @@ from PIL import Image, ImageOps, ImageSequence
 
 from ..errors import ConversionError
 from ..losses import MAJOR, loss
-from ..registry import converter, option, take
+from ..registry import converter, note, option, take
 
 PIL_FORMAT = {
     "png": "PNG", "jpg": "JPEG", "webp": "WEBP", "gif": "GIF", "bmp": "BMP", "tiff": "TIFF",
@@ -33,6 +33,11 @@ def enable_heif() -> None:
         import pillow_heif
         pillow_heif.register_heif_opener()
 
+
+
+def _pixels(img: Image.Image):
+    """img's pixel values in order (Pillow 12.1 renamed getdata, which 14 removes)."""
+    return img.get_flattened_data() if hasattr(img, "get_flattened_data") else img.getdata()
 
 
 # ---- writers for formats Pillow reads but can't save
@@ -76,9 +81,9 @@ def write_xpm(img: Image.Image, dst: Path) -> None:
     alpha = rgba.getchannel("A").point(lambda a: 255 if a >= 128 else 0)
     pal_img = rgba.convert("RGB").quantize(255, dither=Image.Dither.NONE)
     palette = pal_img.getpalette()[: 3 * 255]
-    px = list(pal_img.getdata())
+    px = list(_pixels(pal_img))
     clear = 255  # index for transparent pixels
-    px = [clear if a == 0 else v for v, a in zip(px, alpha.getdata())]
+    px = [clear if a == 0 else v for v, a in zip(px, _pixels(alpha))]
     used = sorted(set(px))
     cpp = 1 if len(used) <= len(_XPM_CHARS) else 2
     codes = [a + b for a in _XPM_CHARS for b in (_XPM_CHARS if cpp == 2 else [""])]
@@ -110,6 +115,7 @@ SAVE_OPTS = {
     "tiff": {"compression": "tiff_lzw"},
     "pdf": {"resolution": 150},
 }
+HEIC_READABLE = 16 << 20
 QUALITY = {"jpg", "webp", "avif", "heic"}  # lossy: these take the quality setting
 # where the photo's details (EXIF: camera, date, place) and color profile go along
 KEEPS_INFO = {"jpg", "png", "webp", "avif", "heic", "tiff"}
@@ -161,6 +167,26 @@ def photo_info(src: Image.Image, out: Image.Image, fmt: str) -> dict:
     return info
 
 
+def _opens(path: Path) -> bool:
+    try:
+        with Image.open(path) as img:
+            img.load()
+    except ValueError:
+        return False
+    return True
+
+
+def _heic_for_every_reader(img: Image.Image, dst: Path, opts: dict) -> None:
+    """Past HEIC_READABLE bytes x265's picture is valid and FFmpeg opens it, but libde265, the
+    decoder in pillow-heif and many apps, can't: give up quality until it opens."""
+    start = quality = opts["quality"]
+    while quality > 5 and dst.stat().st_size > HEIC_READABLE and not _opens(dst):
+        quality -= 5
+        img.save(dst, PIL_FORMAT["heic"], **dict(opts, quality=quality))
+    if quality != start:
+        note(f"Quality lowered to {quality} from {start}: at a higher quality this picture is too much data for many HEIC readers to open")
+
+
 def save_image(img: Image.Image, dst: Path, fmt: str, frames: list[Image.Image] | None = None,
                duration=None, info: dict | None = None) -> None:
     if fmt in OWN_WRITERS:
@@ -182,6 +208,8 @@ def save_image(img: Image.Image, dst: Path, fmt: str, frames: list[Image.Image] 
             sq.paste(img, ((side - img.width) // 2, (side - img.height) // 2))
             img = sq
     img.save(dst, PIL_FORMAT[fmt], **opts)
+    if fmt == "heic":
+        _heic_for_every_reader(img, dst, opts)
 
 
 def image_notes(src: str, dst: str, opts: dict) -> list:
@@ -254,7 +282,7 @@ def trace_to_svg(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
 def _unused_color(img: Image.Image) -> tuple[int, int, int]:
     """A colour (that survives vtracer's 6-bit colour precision) no pixel of img comes close to."""
     small = img.convert("RGB").resize((min(img.width, 256), min(img.height, 256)))
-    used = {(r >> 3, g >> 3, b >> 3) for r, g, b in small.getdata()}
+    used = {(r >> 3, g >> 3, b >> 3) for r, g, b in _pixels(small)}
     for cand in ((252, 0, 252), (0, 252, 252), (252, 252, 0), (4, 252, 128), (128, 4, 252), (252, 128, 4)):
         if (cand[0] >> 3, cand[1] >> 3, cand[2] >> 3) not in used:
             return cand

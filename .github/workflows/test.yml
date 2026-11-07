@@ -19,7 +19,7 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       - name: Engines
-        run: choco install ffmpeg pandoc imagemagick ghostscript -y --no-progress
+        run: choco install ffmpeg ghostscript -y --no-progress
       - run: python -m pip install -e ".[dev]"
       - run: ruff check .
       - run: python -m pytest -q -rs
@@ -41,7 +41,7 @@ jobs:
           path: ${{ runner.temp }}\choco-cache
           key: choco-libreoffice-fresh-v1
       - name: Engines
-        run: choco install libreoffice-fresh ffmpeg pandoc imagemagick ghostscript -y --no-progress --cache-location "${{ runner.temp }}\choco-cache"
+        run: choco install libreoffice-fresh ffmpeg ghostscript -y --no-progress --cache-location "${{ runner.temp }}\choco-cache"
       - run: python -m pip install -e ".[dev]"
       - run: python -m pytest -q -rs
         env:

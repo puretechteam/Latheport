@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -42,6 +42,7 @@ from PySide6.QtGui import (
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -53,6 +54,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QMessageBox,
     QProgressBar,
@@ -60,12 +63,13 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSlider,
     QStyledItemDelegate,
+    QSystemTrayIcon,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from . import __version__, cancel, engines, options, pipeline, registry
+from . import __version__, cancel, engines, options, pipeline, registry, updates, watch
 from .assurance import Report, show
 from .detect import detect
 from .errors import ConversionError
@@ -180,6 +184,9 @@ QMenu {{ background: {surface}; border: 1px solid {border}; padding: 4px; }}
 QMenu::item {{ padding: 7px 20px; border-radius: 6px; }}
 QMenu::item:selected {{ background: {accent_soft}; }}
 QMenu::separator {{ height: 1px; background: {border}; margin: 4px 8px; }}
+QListWidget#queue {{ background: {surface}; border: 1px solid {border}; border-radius: 8px; padding: 4px; }}
+QListWidget#queue::item {{ padding: 3px 6px; border-radius: 5px; }}
+QListWidget#queue::item:selected {{ background: {accent_soft}; color: {text}; }}
 """
 
 
@@ -283,10 +290,13 @@ class Job(QThread):
     progress = Signal(str)
     done = Signal(list, list, list, list)  # outputs, errors, notes, reports (assurance.Report)
 
-    def __init__(self, files: list[Path], target: str | None, install: list[str], settings: dict | None = None):
+    def __init__(self, files: list[Path], target: str | None, install: list[str], settings: dict | None = None,
+                 join: bool = False, out_dir: Path | None = None):
         super().__init__()
         self.files, self.target, self.install = files, target, install
         self.settings = settings or {}
+        self.join = join  # the files become one, in order (pipeline.join)
+        self.out_dir = out_dir  # None: next to each file
         self.token = cancel.Token()
 
     def cancel(self) -> None:
@@ -318,6 +328,10 @@ class Job(QThread):
         if errors or self.cancelled:
             self.done.emit(outputs, errors, notes, reports)
             return
+        if self.join:
+            self._join(outputs, errors, notes, reports)
+            self.done.emit(outputs, errors, notes, reports)
+            return
         for i, f in enumerate(self.files, 1):
             if self.cancelled:
                 break
@@ -331,7 +345,7 @@ class Job(QThread):
                     out = pipeline.extract(f, notes=found)
                 else:
                     report = Report()
-                    out = pipeline.convert(f, self.target, report=report, options=self.settings)
+                    out = pipeline.convert(f, self.target, self.out_dir, report=report, options=self.settings)
                     reports.append(report)
                     found = [report.summary()] if report.summary() else []
                 outputs.append(out)
@@ -343,6 +357,20 @@ class Job(QThread):
             except Exception as exc:  # noqa: BLE001 - a surprise must not leave the window spinning forever
                 errors.append(f"{f.name}: unexpected {type(exc).__name__}: {exc}")
         self.done.emit(outputs, errors, notes, reports)
+
+    def _join(self, outputs: list, errors: list, notes: list, reports: list) -> None:
+        self.progress.emit(f"Joining {len(self.files)} files")
+        try:
+            report = Report()
+            outputs.append(pipeline.join(self.files, self.target, self.out_dir, report=report, options=self.settings))
+            reports.append(report)
+            notes += [f"{self.files[0].name}: {report.summary()}"] if report.summary() else []
+        except cancel.Cancelled:
+            pass
+        except (ConversionError, OSError) as exc:
+            errors.append(f"{self.files[0].name}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - a surprise must not leave the window spinning forever
+            errors.append(f"{self.files[0].name}: unexpected {type(exc).__name__}: {exc}")
 
     def _counter(self, line: str):
         """The status line with the MB written so far, for archives over 50 MB."""
@@ -429,7 +457,12 @@ def file_size(n: int) -> str:
 
 
 THUMB_MAX_BYTES = 300 * 2**20  # bigger pictures just get the badge
-_THUMB_JOBS: set = set()  # a QThread must outlive its run, even if a newer file replaced it
+_THREADS: set = set()  # a QThread must outlive its run, even if a newer file replaced it or its dialog closed
+
+
+def _keep_until_done(job: QThread) -> None:
+    _THREADS.add(job)
+    job.finished.connect(lambda: _THREADS.discard(job))
 
 
 def _thumbnail(path: Path, fmt: str, w: int, h: int) -> QImage | None:
@@ -620,8 +653,7 @@ class DropZone(QFrame):
                 self.thumb_for = files[0]
                 job = ThumbJob(files[0], fmts[0], Badge.THUMB)
                 job.done.connect(self._thumb_ready)  # a bound slot: dropped if the window goes first
-                _THUMB_JOBS.add(job)
-                job.finished.connect(lambda: _THUMB_JOBS.discard(job))
+                _keep_until_done(job)
                 job.start()
 
     def _thumb_ready(self, path: Path, image: QImage | None) -> None:
@@ -1011,7 +1043,6 @@ class EnginesDialog(QDialog):
         grid.setVerticalSpacing(6)
         grid.setColumnStretch(0, 1)
         lay.addLayout(grid)
-        self.jobs: list[InstallJob] = []
         for row, (eng, path) in enumerate(engines.status()):
             name = QLabel(eng.name)
             name.setMinimumHeight(30)
@@ -1035,8 +1066,14 @@ class EnginesDialog(QDialog):
         btn.setEnabled(False)
         btn.setText("Installing…")
         job = InstallJob(key)
-        job.finished_ok.connect(lambda ok, err: btn.setText("Installed" if ok else (err or "Failed")))
-        self.jobs.append(job)
+
+        def done(ok: bool, err: str) -> None:
+            try:
+                btn.setText("Installed" if ok else (err or "Failed"))
+            except RuntimeError:  # the dialog was closed meanwhile
+                pass
+        job.finished_ok.connect(done)
+        _keep_until_done(job)
         job.start()
 
 
@@ -1239,7 +1276,7 @@ class ChoiceSetting(QComboBox):
         if not st.choices:
             self.setEditable(True)
             self.setInsertPolicy(QComboBox.NoInsert)
-            self.lineEdit().setPlaceholderText(f"{st.low} to {st.high}{st.unit}")
+            self.lineEdit().setPlaceholderText("like 1:30" if st.time else f"{st.low} to {st.high}{st.unit}")
             self.lineEdit().editingFinished.connect(self._typed)
 
     def value(self):
@@ -1399,8 +1436,17 @@ class OptionsPanel(QWidget):
             self.values[key] = value
         self._saved()
 
+    def forget_once(self) -> None:
+        """New files: drop the settings meant for the last ones only (a trim)."""
+        once = {k for k in self.values if k not in options.lasting(self.values)}
+        if once:
+            for k in once:
+                self.values.pop(k)
+            self._sync()
+            self._refresh_head()
+
     def _saved(self) -> None:
-        self.store.setValue("options/values", json.dumps(self.values))
+        self.store.setValue("options/values", json.dumps(options.lasting(self.values)))
         self._fill_presets()
         self._refresh_head()
         self.changed.emit()
@@ -1632,6 +1678,98 @@ class DetailsDialog(QDialog):
         return text
 
 
+@dataclass
+class QueueEntry:
+    """Files waiting their turn (dropped while a conversion ran, or new in a watched folder), the
+    one converting, and the ones done since the queue started."""
+    files: list[Path]
+    target: str
+    settings: dict = field(default_factory=dict)
+    join: bool = False
+    out_dir: Path | None = None
+    state: str = "waiting"  # waiting, converting, done, failed, stopped
+    why: str = ""
+
+    def text(self) -> str:
+        names = self.files[0].name + (f" +{len(self.files) - 1}" if len(self.files) > 1 else "")
+        state = {"waiting": "waiting", "converting": "converting…", "done": "saved", "failed": "didn't convert",
+                 "stopped": "stopped"}[self.state]
+        return f"{names}  →  {self.target.upper()} · {state}" + (f": {self.why}" if self.why else "")
+
+
+class UpdateJob(QThread):
+    """Asks GitHub once whether a newer ConvertAll is out (updates.py)."""
+    found = Signal(str, str)  # version, release page
+
+    def run(self) -> None:
+        got = updates.latest()
+        if got and updates.newer(got[0]):
+            self.found.emit(*got)
+
+
+class WatchDialog(QDialog):
+    """☰ → Watch folders: folders whose new files are converted, each to its format."""
+
+    def __init__(self, parent: Window):
+        super().__init__(parent)
+        self.win = parent
+        self.setWindowTitle("Watch folders")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 18, 18, 16)
+        lay.setSpacing(10)
+        intro = QLabel("Files that land in these folders are converted into a Converted folder inside them, "
+                       "while ConvertAll is open. The originals are left as they are, and so are files that "
+                       "were there already.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        self.list = QListWidget()
+        self.list.setObjectName("queue")
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        add = QPushButton("Add a folder…")
+        add.clicked.connect(self.add)
+        self.remove_btn = QPushButton("Stop watching it")
+        self.remove_btn.clicked.connect(self.remove)
+        row.addWidget(add)
+        row.addWidget(self.remove_btn)
+        row.addStretch()
+        lay.addLayout(row)
+        self.tray = QCheckBox("Keep watching from the notification area after closing the window")
+        self.tray.setChecked(self.win.settings.value("watch/tray", "false") == "true")
+        self.tray.toggled.connect(lambda on: self.win.settings.setValue("watch/tray", "true" if on else "false"))
+        lay.addWidget(self.tray)
+        close = QPushButton("Close")
+        close.setObjectName("primary")
+        close.clicked.connect(self.accept)
+        lay.addWidget(close, 0, Qt.AlignRight)
+        self.resize(500, 360)
+        self.fill()
+
+    def fill(self) -> None:
+        self.list.clear()
+        for w in self.win.watch_list():
+            self.list.addItem(f"{w['folder']}  →  {w['target'].upper()}")
+        self.remove_btn.setEnabled(self.list.count() > 0)
+
+    def add(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "A folder to watch")
+        if not folder:
+            return
+        targets = sorted({e.dst for edges in registry._edges.values() for e in edges})
+        names = [f"{t.upper()}  ·  {label(t)}" if label(t).upper() != t.upper() else t.upper() for t in targets]
+        pick, ok = QInputDialog.getItem(self, "Watch folders", "What new files there become:", names,
+                                        names.index("PDF") if "PDF" in names else 0, False)
+        if ok:
+            self.win.set_watch_list([*self.win.watch_list(), {"folder": folder, "target": targets[names.index(pick)]}])
+            self.fill()
+
+    def remove(self) -> None:
+        row = self.list.currentRow() if self.list.currentRow() >= 0 else self.list.count() - 1
+        kept = [w for i, w in enumerate(self.win.watch_list()) if i != row]
+        self.win.set_watch_list(kept)
+        self.fill()
+
+
 class Window(QWidget):
     def __init__(self):
         super().__init__()
@@ -1659,6 +1797,21 @@ class Window(QWidget):
         self.notes_timer.setSingleShot(True)
         self.notes_timer.setInterval(NOTES_SETTLE_MS)
         self.notes_timer.timeout.connect(self.refresh_notes)
+        self.queue: list[QueueEntry] = []  # shown while there's more than one: waiting, converting, done
+        self.entry: QueueEntry | None = None  # the one converting
+        self.watchers: list[watch.Watcher] = []
+        self.watch_timer = QTimer(self)
+        self.watch_timer.setInterval(1000)
+        self.watch_timer.timeout.connect(self.poll_watched)
+        # the next waiting file starts from the window's own timer: a QTimer.singleShot with a bound
+        # method would keep a closed window alive until it fired
+        self.queue_timer = QTimer(self)
+        self.queue_timer.setSingleShot(True)
+        self.queue_timer.setInterval(200)
+        self.queue_timer.timeout.connect(self.next_in_queue)
+        self.tray: QSystemTrayIcon | None = None
+        self.quitting = False
+        self.update_job: UpdateJob | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 16, 22, 20)
@@ -1669,6 +1822,13 @@ class Window(QWidget):
         title.setObjectName("title")
         head.addWidget(title)
         head.addStretch()
+        self.update_link = QPushButton("")
+        self.update_link.setObjectName("link")
+        self.update_link.setCursor(Qt.PointingHandCursor)
+        self.update_link.hide()
+        self.update_page = ""
+        self.update_link.clicked.connect(self.open_update)
+        head.addWidget(self.update_link)
         menu_btn = IconButton("menu", "Menu")
         menu_btn.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(self)
@@ -1680,6 +1840,12 @@ class Window(QWidget):
         self.start_action.triggered.connect(self.toggle_start_menu)
         if sys.platform == "win32":
             menu.addAction(self.start_action)
+        menu.addAction("Watch folders…", self.show_watch)
+        self.update_action = QAction("Check for updates once a day", self)
+        self.update_action.setCheckable(True)
+        self.update_action.setChecked(self.settings.value("update/check", "true") != "false")
+        self.update_action.toggled.connect(self.toggle_updates)
+        menu.addAction(self.update_action)
         menu.addSeparator()
         menu.addAction("Help and chat on Discord", lambda: QDesktopServices.openUrl(QUrl(DISCORD)))
         menu.addAction("About ConvertAll", self.about)
@@ -1717,6 +1883,11 @@ class Window(QWidget):
         self.picker.changed.connect(self._format_picked)
         self.options_panel.changed.connect(self.notes_timer.start)
 
+        self.join_box = QCheckBox("Join them into one file, in this order")
+        self.join_box.setToolTip("Put the sound or videos end to end in one file, instead of converting each")
+        self.join_box.hide()
+        root.addWidget(self.join_box)
+
         self.extract_btn = QPushButton("Extract here")
         self.extract_btn.setFixedHeight(CONTROL)
         self.extract_btn.setToolTip("Unpack it into a folder next to it")
@@ -1728,6 +1899,15 @@ class Window(QWidget):
         self.bar.setTextVisible(False)
         self.bar.hide()
         root.addWidget(self.bar)
+
+        self.queue_view = QListWidget()
+        self.queue_view.setObjectName("queue")
+        self.queue_view.setMaximumHeight(118)
+        self.queue_view.setToolTip("Waiting files: select one and press Delete to take it out")
+        self.queue_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.queue_view.customContextMenuRequested.connect(self._queue_menu)
+        self.queue_view.hide()
+        root.addWidget(self.queue_view)
 
         # After a run: what happened (colored), the links, and under them what the route
         # couldn't keep. Hidden while there's nothing to say, so no empty band is left over.
@@ -1835,13 +2015,19 @@ class Window(QWidget):
             self.fill_picker()
 
     def set_files(self, paths: list[Path]) -> None:
-        if self.job:
-            return
         paths = [p for p in paths if p.exists()]
         if not paths:
             return
+        if self.job:
+            self.enqueue_drop(paths)
+            return
+        if not any(e.state == "waiting" for e in self.queue):
+            self.queue = []  # what's done stays listed only until the next drop
+            self.show_queue()
         self.files = paths
         self.fmts = [detect(p) for p in paths]
+        self.options_panel.forget_once()
+        self.join_box.setChecked(False)
         if time.monotonic() - self.probed > ENGINE_RECHECK_S:  # pick up engines installed meanwhile
             engines.refresh()
             self.probed = time.monotonic()
@@ -1888,6 +2074,8 @@ class Window(QWidget):
     def update_options(self) -> None:
         """Show the settings the chosen format's route takes (none: no panel at all)."""
         target = self.picker.current()
+        self.join_box.setVisible(len(self.files) > 1 and bool(target) and category(target) in pipeline.JOINABLE
+                                 and all(category(f) in pipeline.JOINABLE for f in self.fmts))
         keys = list(dict.fromkeys(k for r in self.routes.get(target, ()) for k in r.settings)) if target else []
         self.options_panel.show_for(keys, target)
 
@@ -1943,6 +2131,9 @@ class Window(QWidget):
     def closeEvent(self, event) -> None:
         """Closing mid-job asks first, then stops the job and closes once it has: Qt would
         otherwise tear the window down under a running thread and leave its engine running."""
+        if self._to_tray():
+            event.ignore()
+            return
         job = self.job
         if isinstance(job, Job) and job.isRunning():
             if not self.close_when_done and not self.confirm_stop():
@@ -1969,7 +2160,8 @@ class Window(QWidget):
         if missing and not self.confirm_install(missing):
             return
         keys = {k for r in self.routes[target] for k in r.settings}
-        self.run_job(Job(self.files, target, missing, options.applying(self.options_panel.chosen(), keys)))
+        join = self.join_box.isVisible() and self.join_box.isChecked()
+        self.run_job(Job(self.files, target, missing, options.applying(self.options_panel.chosen(), keys), join))
 
     def start_extract(self) -> None:
         self.run_job(Job(self.files, None, []))  # every archive is read built in: nothing to install
@@ -1989,9 +2181,16 @@ class Window(QWidget):
         box.button(QMessageBox.Yes).setText("Install")
         return fit_buttons(box)
 
-    def run_job(self, job: Job) -> None:
+    def run_job(self, job: Job, entry: QueueEntry | None = None) -> None:
+        if entry is None:
+            entry = QueueEntry(list(job.files), job.target or "folder", job.settings, job.join, job.out_dir)
+            if self.queue:
+                self.queue.append(entry)
+        entry.state = "converting"
+        self.entry = entry
+        self.show_queue()
         self.job = job
-        for w in (self.picker, self.extract_btn, self.options_panel):
+        for w in (self.picker, self.extract_btn, self.options_panel, self.join_box):
             w.setEnabled(False)
         self.convert_btn.setText("Cancel")
         self.convert_btn.setEnabled(True)
@@ -2024,6 +2223,7 @@ class Window(QWidget):
         self.outputs = outputs
         self.reports = reports or []
         self.options_panel.setEnabled(True)
+        self.join_box.setEnabled(True)
         self.bar.setRange(0, 1)
         self.bar.setValue(1)
         self.bar.hide()
@@ -2056,8 +2256,214 @@ class Window(QWidget):
                 self.set_status(done, "ok")
             if len(self.reports) == 1:
                 self.set_tip("\n".join(self.reports[0].lines()))
+        if self.entry is not None:
+            self.entry.state = "stopped" if stopped else "failed" if errors else "done"
+            self.entry.why = errors[0].split(": ", 1)[-1] if errors else ""
+            self.entry = None
+            self.show_queue()
         if self.pending_extract:  # more archives were right-clicked while this ran
             self.extract_timer.start()
+        elif stopped:
+            for e in self.queue:  # Cancel stops the queue too: what was waiting stays undone
+                if e.state == "waiting":
+                    e.state = "stopped"
+            self.show_queue()
+        else:
+            self.queue_timer.start()
+
+    # ------------------------------------------------ the queue
+
+    def enqueue_drop(self, paths: list[Path]) -> None:
+        """Files dropped while converting: they wait, to become what's converting now when they can,
+        else what this kind of file usually becomes."""
+        fmts = [detect(p) for p in paths]
+        routes = registry.common_targets(fmts)
+        target = self.job.target if self.job and self.job.target in routes else None
+        if target is None:
+            remembered = self.settings.value(f"last/{fmts[0]}", "")
+            target = remembered if remembered in routes else suggest(fmts[0], routes)
+        if not target:
+            self.set_status(f"Nothing to convert {paths[0].name} to", "error")
+            return
+        keys = {k for r in routes[target] for k in r.settings}
+        settings = options.applying(options.lasting(self.options_panel.chosen()), keys)
+        if not self.queue and self.entry is not None:
+            self.queue.append(self.entry)
+        self.queue.append(QueueEntry(paths, target, settings))
+        self.show_queue()
+
+    def enqueue_watched(self, path: Path, w: watch.Watch) -> None:
+        if any(path in e.files and e.state in ("waiting", "converting") for e in self.queue):
+            return
+        try:
+            route = registry.find_route(detect(path), w.target)
+        except Exception:  # noqa: BLE001 - a file the folder's format can't take is left alone
+            return
+        settings = options.applying(options.lasting(self.options_panel.chosen()), set(route.settings))
+        if not self.queue and self.entry is not None:
+            self.queue.append(self.entry)
+        self.queue.append(QueueEntry([path], w.target, settings, out_dir=w.out))
+        self.show_queue()
+        if not self.job:
+            self.next_in_queue()
+
+    def next_in_queue(self) -> None:
+        if self.job or self.close_when_done:
+            return
+        entry = next((e for e in self.queue if e.state == "waiting"), None)
+        if entry is None:
+            return
+        if entry.out_dir is None:  # dropped files: they become the window's files, as a drop does
+            self.files = entry.files
+            self.fmts = [detect(f) for f in entry.files]
+            self.drop.show_files(self.files, self.fmts)
+            self.routes = registry.common_targets(self.fmts)
+            self.fill_picker()
+            self.picker.set_current(entry.target)
+        try:
+            routes = [registry.find_route(detect(f), entry.target) for f in entry.files]
+        except Exception as exc:  # noqa: BLE001
+            entry.state, entry.why = "failed", str(exc)
+            self.show_queue()
+            self.queue_timer.start()
+            return
+        missing = list(dict.fromkeys(e for r in routes for e in r.missing_engines))
+        if missing:  # no question pops up for a file that was waiting: say what it needs
+            entry.state = "failed"
+            entry.why = f"needs {', '.join(engines.ENGINES[m].name for m in missing)}: convert it on its own to install"
+            self.show_queue()
+            self.queue_timer.start()
+            return
+        self.run_job(Job(entry.files, entry.target, [], entry.settings, entry.join, entry.out_dir), entry)
+
+    def show_queue(self) -> None:
+        self.queue_view.clear()
+        for e in self.queue:
+            item = QListWidgetItem(e.text())
+            item.setData(Qt.UserRole, id(e))
+            self.queue_view.addItem(item)
+        self.queue_view.setVisible(len(self.queue) > 1 or any(e.out_dir for e in self.queue))
+
+    def remove_waiting(self, rows: list[int]) -> None:
+        drop = {id(self.queue[r]) for r in rows if 0 <= r < len(self.queue) and self.queue[r].state == "waiting"}
+        self.queue = [e for e in self.queue if id(e) not in drop]
+        self.show_queue()
+
+    def _queue_menu(self, pos) -> None:
+        row = self.queue_view.indexAt(pos).row()
+        if 0 <= row < len(self.queue) and self.queue[row].state == "waiting":
+            menu = QMenu(self)
+            menu.addAction("Take it out of the queue", lambda: self.remove_waiting([row]))
+            menu.exec(self.queue_view.mapToGlobal(pos))
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Delete and self.queue_view.hasFocus():
+            self.remove_waiting([i.row() for i in self.queue_view.selectedIndexes()])
+            return
+        super().keyPressEvent(event)
+
+    # ------------------------------------------------ watch folders
+
+    def watch_list(self) -> list[dict]:
+        try:
+            got = json.loads(self.settings.value("watch/list", "[]") or "[]")
+        except (TypeError, ValueError):
+            return []
+        return [w for w in got if isinstance(w, dict) and isinstance(w.get("folder"), str)
+                and isinstance(w.get("target"), str)] if isinstance(got, list) else []
+
+    def set_watch_list(self, items: list[dict]) -> None:
+        self.settings.setValue("watch/list", json.dumps(items))
+        self.start_watching()
+
+    def start_watching(self) -> None:
+        self.watchers = [watch.Watcher(watch.Watch(Path(w["folder"]), w["target"])) for w in self.watch_list()
+                         if Path(w["folder"]).is_dir()]
+        if self.watchers:
+            self.watch_timer.start()
+        else:
+            self.watch_timer.stop()
+        if self.tray is not None:
+            self.tray.setToolTip(self._watching_text())
+
+    def _watching_text(self) -> str:
+        n = len(self.watchers)
+        return f"ConvertAll · watching {n} folder{'s' if n != 1 else ''}"
+
+    def poll_watched(self) -> None:
+        for w in self.watchers:
+            for path in w.poll():
+                self.enqueue_watched(path, w.watch)
+
+    def show_watch(self) -> QDialog:
+        dialog = WatchDialog(self)
+        dialog.open()
+        return dialog
+
+    def _to_tray(self) -> bool:
+        """Closing while folders are watched, with the notification-area choice on: hide instead."""
+        if self.quitting or not self.watchers or self.settings.value("watch/tray", "false") != "true" \
+                or not QSystemTrayIcon.isSystemTrayAvailable():
+            return False
+        if self.tray is None:
+            self.tray = QSystemTrayIcon(self.windowIcon(), self)
+            menu = QMenu(self)
+            menu.addAction("Open ConvertAll", self._from_tray)
+            menu.addAction("Stop watching and quit", self._quit_from_tray)
+            self.tray.setContextMenu(menu)
+            self.tray.activated.connect(lambda reason: self._from_tray()
+                                        if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
+        self.tray.setToolTip(self._watching_text())
+        self.tray.show()
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+        self.hide()
+        return True
+
+    def _from_tray(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self) -> None:
+        self.quitting = True
+        if self.tray is not None:
+            self.tray.hide()
+        QApplication.instance().setQuitOnLastWindowClosed(True)
+        self.close()
+        if not self.isVisible():
+            QApplication.instance().quit()
+
+    # ------------------------------------------------ updates
+
+    def check_updates(self, now: float | None = None) -> None:
+        if self.settings.value("update/check", "true") == "false" or self.update_job is not None:
+            return
+        now = time.time() if now is None else now
+        try:
+            last = float(self.settings.value("update/checked", "0") or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if not updates.due(last, now):
+            return
+        self.settings.setValue("update/checked", str(now))
+        self.update_job = UpdateJob(self)
+        self.update_job.found.connect(self.show_update)
+        self.update_job.start()
+
+    def show_update(self, version: str, page: str) -> None:
+        self.update_link.setText(f"ConvertAll {version} is out")
+        self.update_link.setToolTip(f"Open its download page: {page}")
+        self.update_page = page
+        self.update_link.show()
+
+    def open_update(self) -> None:
+        if self.update_page:
+            QDesktopServices.openUrl(QUrl(self.update_page))
+
+    def toggle_updates(self, on: bool) -> None:
+        self.settings.setValue("update/check", "true" if on else "false")
+        if not on:
+            self.update_link.hide()
 
     def show_details(self) -> QDialog:
         dialog = DetailsDialog(self, self.reports)
@@ -2121,8 +2527,8 @@ class Window(QWidget):
         box.setText(f"<b>ConvertAll {__version__}</b><br>"
                     "Convert, compress or extract any file.<br><br>"
                     "Uses Pillow, PDFium, py7zr, fontTools, trimesh, gmsh, ezdxf, pydicom, meshport, "
-                    f"{archives}, bookport, vtracer, pysubs2, pycdlib and, when needed, FFmpeg, "
-                    "LibreOffice, ImageMagick, Pandoc, DjVuLibre and Ghostscript.<br><br>"
+                    f"{archives}, bookport, pixport, vtracer, pysubs2, pycdlib and, when needed, FFmpeg, "
+                    "LibreOffice and Ghostscript.<br><br>"
                     f'Questions, ideas or just chatting: <a href="{DISCORD}">ConvertAll on Discord</a>')
         for text in box.findChildren(QLabel):
             text.setOpenExternalLinks(True)  # the Discord link opens in the browser
@@ -2392,11 +2798,20 @@ def run(files: list[str], mode: str, lock) -> int:
                                                                            mode == "extract"))
         else:  # load the converters while the window waits for a file, not before it shows
             QTimer.singleShot(150, registry._ensure_loaded)
+    win.start_watching()
+    QTimer.singleShot(4000, win.check_updates)  # after the window is up, never in its way
     code = app.exec()
     if isinstance(win.job, Job) and win.job.isRunning():  # quit some other way mid-job: stop it first
         win.job.cancel()
         win.job.wait()
     lock.unlock()
+    viewer = sys.modules.get("convertall.viewer")
+    busy = [*_THREADS, win.update_job, *(viewer._RUNNING if viewer else ())]
+    if any(t is not None and t.isRunning() for t in busy):
+        # Python going away destroys a running QThread, and Qt ends the program with a crash code
+        # for that. A thumbnail, a download or a check that no one's waiting for can just stop.
+        win.settings.sync()
+        os._exit(code)
     return code
 
 

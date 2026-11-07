@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-import os
 import subprocess
 import sys
 import threading
@@ -77,16 +76,66 @@ class Token:
                 self._procs.discard(proc)
 
 
+def _kill_windows_tree(root: int) -> None:
+    """root and what it started, from Windows' own list of programs: taskkill /T does the same
+    but took 1.5 s here, with 350 programs running, and Cancel promises one."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Entry(ctypes.Structure):  # PROCESSENTRY32W
+        _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD), ("pid", wintypes.DWORD),
+                    ("heap", ctypes.c_size_t), ("module", wintypes.DWORD), ("threads", wintypes.DWORD),
+                    ("parent", wintypes.DWORD), ("priority", wintypes.LONG), ("flags", wintypes.DWORD),
+                    ("exe", ctypes.c_wchar * 260)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = wintypes.HANDLE
+    k32.CreateToolhelp32Snapshot.restype = handle
+    k32.Process32FirstW.argtypes = k32.Process32NextW.argtypes = (handle, ctypes.POINTER(Entry))
+    k32.OpenProcess.restype = handle
+    k32.CloseHandle.argtypes = (handle,)
+    k32.TerminateProcess.argtypes = (handle, wintypes.UINT)
+    k32.GetProcessTimes.argtypes = (handle, *[ctypes.POINTER(ctypes.c_ulonglong)] * 4)
+
+    def started(pid: int) -> int:
+        """When pid began, 0 if that can't be asked."""
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return 0
+        times = [ctypes.c_ulonglong() for _ in range(4)]
+        ok = k32.GetProcessTimes(h, *[ctypes.byref(t) for t in times])
+        k32.CloseHandle(h)
+        return times[0].value if ok else 0
+
+    children: dict[int, list[int]] = {}
+    snapshot = k32.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
+    if snapshot and snapshot != handle(-1).value:
+        entry = Entry()
+        entry.size = ctypes.sizeof(Entry)
+        more = k32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            children.setdefault(entry.parent, []).append(entry.pid)
+            more = k32.Process32NextW(snapshot, ctypes.byref(entry))
+        k32.CloseHandle(snapshot)
+    tree = [root]
+    for pid in tree:  # grows as it goes: parents first, so none starts another while we work
+        born = started(pid)
+        # Windows reuses numbers: something older than this "parent" had another one, long gone
+        tree += [c for c in children.get(pid, []) if c not in tree and born and started(c) >= born]
+    for pid in tree:
+        h = k32.OpenProcess(1, False, pid)  # PROCESS_TERMINATE
+        if h:
+            k32.TerminateProcess(h, 1)
+            k32.CloseHandle(h)
+
+
 def _kill(proc: subprocess.Popen) -> None:
     """The program and everything it started: LibreOffice's soffice.exe runs soffice.bin, and
     killing only the first would leave the second converting (and holding the files)."""
     if proc.poll() is not None:
         return
     if sys.platform == "win32":
-        # by its full path: a "taskkill.exe" earlier on PATH would be run instead
-        taskkill = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
-        subprocess.run([taskkill, "/F", "/T", "/PID", str(proc.pid)], capture_output=True,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False)
+        _kill_windows_tree(proc.pid)
     if proc.poll() is None:
         proc.kill()
 
@@ -102,10 +151,6 @@ def using(token: Token):
         yield token
     finally:
         _current.reset(reset)
-
-
-def current() -> Token | None:
-    return _current.get()
 
 
 def check() -> None:

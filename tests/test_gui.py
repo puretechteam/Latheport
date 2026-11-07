@@ -1,5 +1,6 @@
 """The window, driven offscreen: drop files, check what's preselected, convert."""
 
+import gc
 import itertools
 import os
 import time
@@ -26,6 +27,9 @@ def app():
 def window(app, tmp_path, monkeypatch):
     settings = QtCore.QSettings(str(tmp_path / "settings.ini"), QtCore.QSettings.IniFormat)
     monkeypatch.setattr(gui, "QSettings", lambda *a: settings)  # a new user, every time
+    # earlier tests' windows go now, between tests, not whenever the collector next runs mid-test
+    # (a test that swaps in its own run_job makes a cycle only the collector frees)
+    gc.collect()
     win = gui.Window()
     yield win
     if win.job is not None:  # a test that failed mid-conversion: stop it without asking, and wait
@@ -523,6 +527,19 @@ def test_options_and_presets_reach_the_conversion(window, samples, tmp_path, mon
     assert panel.pills["Default"].isChecked() and panel.save_pill is None
 
 
+def test_colour_depth_is_offered_for_an_hdr_picture(window, samples):
+    window.set_files([samples("exr")])
+    panel = window.options_panel
+    window.picker.set_current("png")
+    assert list(panel.widgets) == ["bit_depth", "max_size"]
+    box = panel.widgets["bit_depth"]
+    assert [box.itemText(i) for i in range(box.count())] == ["As much as the picture has", "8 bits (smaller)", "16 bits"]
+    box.setValue(box.itemData(1))  # as choosing it from the list does
+    assert panel.chosen() == {"bit_depth": "8"}
+    window.picker.set_current("jpg")  # a JPG has 8 bits whatever is chosen
+    assert list(panel.widgets) == ["quality", "max_size"]
+
+
 def test_number_settings_take_a_listed_or_typed_value(window, samples):
     window.set_files([samples("png")])
     window.picker.set_current("jpg")
@@ -719,7 +736,7 @@ def test_cancel_between_files_keeps_the_ones_done(window, tmp_path, monkeypatch)
         srcs.append(src)
     job = gui.Job(srcs, "pdf", [])
 
-    def convert(f, target, report=None, options=None):
+    def convert(f, target, out_dir=None, report=None, options=None):
         out = f.with_suffix(".pdf")
         out.write_text("done")
         job.cancel()  # Cancel clicked while the first file was converting: it still finishes

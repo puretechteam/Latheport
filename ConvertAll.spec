@@ -8,7 +8,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 ICON = "convertall/assets/icon.ico"
 SOURCES = ["**/*.c", "**/*.h", "**/*.pyx", "**/*.pxd", "**/*.pyi"]  # build leftovers, never loaded
 DATAS = [("convertall/assets", "convertall/assets")]
-for pkg in ("trimesh", "ezdxf"):  # json schemas, templates, fonts loaded at runtime
+for pkg in ("trimesh", "ezdxf", "collada"):  # json schemas, templates, fonts loaded at runtime
     DATAS += collect_data_files(pkg, excludes=SOURCES)
 DATAS += collect_data_files("pydicom", excludes=["**/test_files/**", "**/charset_files/**"])
 DATAS += collect_data_files("bookport", excludes=SOURCES)  # the fonts its PDFs embed, hyphenation data
@@ -18,7 +18,7 @@ DATAS += collect_data_files("bookport", excludes=SOURCES)  # the fonts its PDFs 
 BINARIES = []
 
 MODULES = (collect_submodules("convertall") + collect_submodules("meshport") + collect_submodules("packport")
-           + collect_submodules("bookport")
+           + collect_submodules("bookport") + collect_submodules("pixport")  # pixport.raw loads its decoders by name
            + ["pydicom.pixels.decoders", "jpeg_ls", "lz4.frame", "lz4.block", "backports.zstd", "pycdlib", "pysubs2", "olefile", "vtracer", "brotli"])
 # PyMuPDF (AGPL) is only the tests' second opinion on PDFs: ConvertAll reads them with PDFium.
 # unittest stays: pyparsing (under ezdxf) imports it, and without it every DXF conversion failed
@@ -29,6 +29,10 @@ EXCLUDES = ["tkinter", "pydoc_data", "test", "pymupdf", "fitz", "pymupdf4llm", "
 # without it, and the 3D tests pass with it blocked. Leaving it out saves ~60 MB (it brings a
 # second copy of OpenBLAS). networkx stays: trimesh writes 3MF with it.
 EXCLUDES += ["scipy"]
+# Build tools, debuggers and tests that nothing here calls. pygments comes in only for Markdown's
+# code highlighting, which no conversion turns on (it does without pygments when it isn't there).
+EXCLUDES += ["setuptools", "pkg_resources", "distutils", "pygments", "numpy.f2py", "numpy.testing", "asyncio",
+             "pdb", "doctest", "pydoc", "_pyrepl", "lxml.objectify"]
 
 # The window needs QtCore/QtGui/QtWidgets/QtNetwork, QtSvg (SVGs into PDFs and pictures) and the
 # qwindows platform plugin. PySide6's hook also ships plugins that drag in Quick/QML (virtual
@@ -41,9 +45,10 @@ QT_DROP = re.compile(r"""(?ix)
       | translations[\\/]
       | plugins[\\/](tls|networkinformation|platforminputcontexts|generic|iconengines|styles)[\\/]
       | plugins[\\/]platforms[\\/]q(direct2d|minimal|offscreen)\.dll
-      | plugins[\\/]imageformats[\\/]q(pdf|svg)\.dll
+      | plugins[\\/]imageformats[\\/]q(pdf|svg|icns|tga|tiff|wbmp)\.dll
     )
     | ^lib(ssl|crypto)-3-x64\.dll$        # OpenSSL copy used only by Qt's TLS plugin
+    | ^Cryptodome[\\/]PublicKey[\\/]      # py7zr only needs AES and its hash (AES itself loads Protocol)
 """)
 
 
@@ -54,8 +59,9 @@ def slim(toc):
 # convertall-cli.exe isn't built here: it's a small native launcher (packaging/launcher, built by
 # release.py) that runs ConvertAll.exe --cli on its console, so ConvertAll's code is in the
 # download once, not once per program (each PyInstaller exe carries its own copy of it).
+# optimize=2 leaves docstrings and asserts out of the code it packs: 15% off the archive inside the exe
 gui = Analysis(["packaging/gui_entry.py"], pathex=["."], hiddenimports=MODULES, datas=DATAS,
-               binaries=BINARIES, excludes=EXCLUDES)
+               binaries=BINARIES, excludes=EXCLUDES, optimize=2)
 gui.binaries, gui.datas = slim(gui.binaries), slim(gui.datas)
 
 gui_exe = EXE(PYZ(gui.pure), gui.scripts, [], exclude_binaries=True, name="ConvertAll",

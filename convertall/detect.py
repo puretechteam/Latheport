@@ -149,6 +149,19 @@ def _deeper(path: Path, head: bytes) -> str | None:
     return None
 
 
+def _is_man(path: Path, text: bytes) -> bool:
+    """A man page named by its section (ls.1, printf.3): after its comment lines it starts with .TH
+    (or .so, an alias page). A rotated log (syslog.1) doesn't."""
+    if not (len(path.suffix) == 2 and path.suffix[1:] in "123456789"):
+        return False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith((b'.\\"', b"'\\\"", b'\\"')):
+            continue
+        return line.startswith((b".TH ", b".so ", b".Dd "))
+    return False
+
+
 def _sniff(path: Path) -> str | None:
     try:
         with path.open("rb") as f:
@@ -166,6 +179,8 @@ def _sniff(path: Path) -> str | None:
         if deeper:
             return deeper
         text = head.lstrip(b"\xef\xbb\xbf \t\r\n")
+        if _is_man(path, text):
+            return "man"
         for start, fmt in _TEXT_STARTS:
             if text.upper().startswith(start):
                 return fmt

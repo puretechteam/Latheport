@@ -1,11 +1,17 @@
-"""Audio and video via FFmpeg."""
+"""Audio and video via FFmpeg: converting, and cutting (Start at / End at), fitting in a size,
+evening out loudness and joining several files into one."""
 
+import json
+import math
+import re
+import subprocess
 from pathlib import Path
 
 from .. import engines
 from ..errors import ConversionError
 from ..losses import loss
-from ..registry import converter, option
+from ..options import parse_time, show_time
+from ..registry import converter, expect, note, option
 
 EVEN = ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]  # H.264/yuv420p needs even dimensions
 # FFmpeg can't read back Theora under 18 pixels a side: smaller pictures are enlarged, shape kept
@@ -55,6 +61,8 @@ VIDEO_ARGS = {
     "vob": ["-c:v", "mpeg2video", "-q:v", "3", *EVEN, "-c:a", "ac3", "-b:a", "192k"],
 }
 
+# Hz: these encoders refuse anything finer and, unlike the rest, don't let FFmpeg choose a rate they take
+TOP_RATE = {"wmav2": 48000, "libvorbis": 192000}
 AUDIO = set(AUDIO_ARGS)
 VIDEO = set(VIDEO_ARGS)
 # FFmpeg reads these fine but can't (usefully) write them
@@ -62,12 +70,18 @@ AUDIO_IN = AUDIO | {"ape", "dsf", "dff"}
 VIDEO_IN = VIDEO | {"mxf", "rm", "rmvb", "3g2"}
 
 
-def ffmpeg(src: Path, dst: Path, args: list[str]) -> None:
+def ffmpeg(src: Path | list[Path], dst: Path | str, args: list[str], before: list[str] = ()) -> str:
+    """Run FFmpeg on src (or several inputs, in order) into dst; before: input options for src
+    (a start time). Returns what FFmpeg said (its stderr)."""
     exe = engines.require("ffmpeg")
-    try:
+    inputs = []
+    for i, one in enumerate(src if isinstance(src, list) else [src]):
         # local files only: a playlist or concat file can't make FFmpeg fetch URLs
-        engines.run([exe, "-hide_banner", "-nostdin", "-y", "-protocol_whitelist", "file",
-                     "-i", str(src), *args, str(dst)])
+        inputs += ["-protocol_whitelist", "file", *(before if i == 0 else ()), "-i", str(one)]
+    src = src[0] if isinstance(src, list) else src
+    try:
+        proc = engines.run([exe, "-hide_banner", "-nostdin", "-y", *inputs, *args, str(dst)])
+        return getattr(proc, "stderr", "") or ""
     except ConversionError as exc:
         msg = str(exc)
         if "does not contain any stream" in msg or "matches no streams" in msg:
@@ -76,6 +90,184 @@ def ffmpeg(src: Path, dst: Path, args: list[str]) -> None:
         if "only possible from text to text or bitmap to bitmap" in msg:
             raise ConversionError(f"{src.name}'s subtitles are pictures (DVD/Blu-ray style), not text") from None
         raise
+
+
+def probe(src: Path) -> dict:
+    """duration (s), width, height, fps, audio (bool) and rate (Hz) of a sound or video file."""
+    from ..assurance import _ffprobe
+    exe = _ffprobe()
+    if not exe:
+        engines.require("ffmpeg")
+        raise ConversionError("FFmpeg's ffprobe is missing: reinstall FFmpeg")
+    out = subprocess.run([exe, "-v", "error", "-protocol_whitelist", "file", "-show_entries",
+                          "format=duration:stream=codec_type,width,height,avg_frame_rate,sample_rate,disposition",
+                          "-of", "json", str(src)], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                         check=False, timeout=60, creationflags=engines.NO_WINDOW, stdin=subprocess.DEVNULL)
+    info = json.loads(out.stdout or "{}")
+    streams = [st for st in info.get("streams", []) if not (st.get("disposition") or {}).get("attached_pic")]
+    facts = {"duration": 0.0, "audio": False, "rate": 48000}
+    try:
+        facts["duration"] = float(info["format"]["duration"])
+    except (KeyError, TypeError, ValueError):
+        pass
+    for st in streams:
+        if st.get("codec_type") == "video" and st.get("width") and "width" not in facts:
+            facts["width"], facts["height"] = int(st["width"]), int(st["height"])
+            num, _, den = str(st.get("avg_frame_rate", "0/1")).partition("/")
+            try:
+                fps = float(num) / float(den or 1)
+            except (ValueError, ZeroDivisionError):
+                fps = 0.0
+            facts["fps"] = fps if 0 < fps <= 1000 else 25.0
+        elif st.get("codec_type") == "audio" and not facts["audio"]:
+            facts["audio"] = True
+            facts["rate"] = int(st.get("sample_rate") or 48000)
+    return facts
+
+
+# ---- cutting: Start at / End at
+
+def _span(info: dict) -> tuple[float, float]:
+    """(start, length) chosen for this file, in seconds; ConversionError when it's outside the file."""
+    start = parse_time(option("start")) if option("start") else 0.0
+    end = parse_time(option("end")) if option("end") else None
+    length = info["duration"]
+    if length and start >= length:
+        raise ConversionError(f"Start at {show_time(start)} is past the end ({show_time(length)} long)")
+    stop = min(end, length) if end is not None and length else end if end is not None else length
+    return start, max(0.0, (stop or 0.0) - start)
+
+
+def _cut(info: dict, video: bool) -> tuple[list[str], list[str]]:
+    """(input options, output options) for the cut, and the length the result should have."""
+    if not option("start") and not option("end"):
+        return [], []
+    start, length = _span(info)
+    before = ["-ss", f"{start:.3f}"] if start else []
+    after = ["-t", f"{length:.3f}"] if option("end") else []
+    # one frame of video, or a sound frame and the encoder's padding, either way
+    within = max(1.0 / info.get("fps", 25.0) if video else 0.0, 0.06)
+    shown = f"{show_time(start)} to {show_time(start + length)}"
+    expect("duration", round(length, 3), f"Cut to {shown}", within=within)
+    return before, after
+
+
+# ---- loudness: EBU R128 in two passes, the way FFmpeg's loudnorm is meant to be used
+
+LOUDNESS = {"streaming": (-14.0, -1.0), "broadcast": (-23.0, -1.0)}  # (integrated LUFS, true peak dBTP)
+
+
+def _loudnorm(src: Path | list[Path], info: dict, before: list[str], cut: list[str], graph: list[str] = (),
+              label: str = "") -> list[str]:
+    """The audio filter that brings src (as cut) to the chosen loudness, measured first."""
+    target, peak = LOUDNESS[option("loudness")]
+    first = f"loudnorm=I={target}:TP={peak}:LRA=11:print_format=json"
+    measure = [*graph[:-1], graph[-1] + f";[{label}]{first}[m]", "-map", "[m]"] if graph else ["-af", first]
+    said = ffmpeg(src, "-", [*cut, "-vn", *measure, "-f", "null"], before)
+    found = re.findall(r"\{[^{}]*\"input_i\"[^{}]*\}", said)
+    if not found:
+        raise ConversionError("FFmpeg couldn't measure how loud it is")
+    m = json.loads(found[-1])
+    if m.get("input_i") in ("-inf", None) or not math.isfinite(float(m["input_i"])):
+        note("It's silent: there's no loudness to even out")
+        return []
+    expect("loudness", target, f"Evened out to {target:g} LUFS", within=1.0)
+    second = (f"loudnorm=I={target}:TP={peak}:LRA=11:measured_I={m['input_i']}:measured_TP={m['input_tp']}:"
+              f"measured_LRA={m['input_lra']}:measured_thresh={m['input_thresh']}:offset={m['target_offset']}:"
+              "linear=true")
+    return [second, f"aresample={info.get('rate', 48000)}"]  # loudnorm works at 192 kHz
+
+
+def _with_audio_filters(args: list[str], filters: list[str]) -> list[str]:
+    if not filters:
+        return args
+    args = list(args)
+    if "-ar" in args:  # the format's own rate (8 kHz for AMR) wins over the source's
+        filters = [f for f in filters if not f.startswith("aresample=")]
+    return ["-af", ",".join(filters), *args]
+
+
+# ---- fitting in a size: a bitrate from the length, then two passes (x264 and VP9 hit it closely)
+
+TWO_PASS = {"libx264", "libvpx-vp9"}
+SIZE_SHARE = 0.96  # of the target, for the container and the encoder's overshoot
+
+
+def _audio_kbps(total: float) -> int:
+    return 128 if total > 1200 else 96 if total > 500 else 64
+
+
+def _fit_video(args: list[str], info: dict, length: float, dst: Path) -> tuple[list[str], list[str] | None]:
+    """(args, first-pass args or None) that keep a video at most target_size MB."""
+    target = option("target_size")
+    total = target * 8 * 1024 * 1024 * SIZE_SHARE / max(length, 0.1) / 1000  # kbit/s
+    audio = _audio_kbps(total) if info.get("audio") else 0
+    video = total - audio
+    if video < 40:
+        raise ConversionError(f"{show_time(length)} of video can't fit in {target} MB: pick a bigger size or cut it shorter")
+    args = list(args)
+    codec = args[args.index("-c:v") + 1]
+    w, h, fps = info.get("width", 1280), info.get("height", 720), info.get("fps", 30.0)
+    if option("fps"):
+        fps = float(option("fps"))
+    # more than this many bits a pixel looks no better: the file just comes out smaller than asked
+    cap = w * h * fps * 0.15 / 1000
+    if video > cap:
+        video = cap
+        note(f"It fits in {target} MB at full quality, so it's smaller than that")
+    elif not option("video_size") and video * 1000 / (w * h * fps) < 0.03:
+        short = max(240, int(math.sqrt(video * 1000 / 0.04 / fps * min(w, h) / max(w, h))) // 2 * 2)
+        if short < min(w, h):
+            args = _with_filters(args, [_short_side(short)])
+            why = f"Scaled down to {short}p so the picture stays clear at this size"
+            long_side = round(max(w, h) * short / min(w, h) / 2) * 2
+            expect("width", short if w < h else long_side, why, within=2)
+            expect("height", long_side if w < h else short, why, within=2)
+    for flag in ("-crf", "-q:v", "-b:v"):
+        if flag in args:
+            i = args.index(flag)
+            del args[i:i + 2]
+    rate = ["-b:v", f"{int(video)}k", "-maxrate", f"{int(video * 1.5)}k", "-bufsize", f"{int(video * 2)}k"]
+    if audio:
+        for flag in ("-b:a", "-q:a"):
+            if flag in args:
+                i = args.index(flag)
+                del args[i:i + 2]
+        args[args.index("-c:a") + 2:args.index("-c:a") + 2] = ["-b:a", f"{audio}k"]
+    i = args.index("-c:v") + 2
+    args[i:i] = rate
+    expect("file_size", float(target), f"Fit in {target} MB", at_most=True)
+    if codec not in TWO_PASS:
+        return args, None
+    log = str(dst.with_name(dst.stem + "-pass"))
+    first = list(args)
+    k = first.index("-c:a")
+    del first[k:k + 2]
+    first = [*first, "-an", "-pass", "1", "-passlogfile", log, "-f", "null"]
+    return [*args, "-pass", "2", "-passlogfile", log], first
+
+
+# MP3 and MP2 have fixed bitrates, and the encoder rounds up to the next one: take the one below
+STEPS = {"mp3": (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),
+         "mp2": (32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384)}
+
+
+def _fit_audio(args: list[str], length: float, fmt: str) -> list[str]:
+    target = option("target_size")
+    kbps = int(target * 8 * 1024 * 1024 * SIZE_SHARE / max(length, 0.1) / 1000)
+    if kbps < 24:
+        raise ConversionError(f"{show_time(length)} of sound can't fit in {target} MB: pick a bigger size or cut it shorter")
+    kbps = min(kbps, 320)
+    if fmt in STEPS:
+        kbps = max((k for k in STEPS[fmt] if k <= kbps), default=STEPS[fmt][0])
+    args = list(args)
+    for flag in ("-q:a", "-b:a"):
+        if flag in args:
+            i = args.index(flag)
+            del args[i:i + 2]
+    args[2:2] = ["-b:a", f"{kbps}k"]
+    expect("file_size", float(target), f"Fit in {target} MB", at_most=True)
+    return args
 
 
 # ---- settings (options.py): each replaces what the args above say when it's chosen
@@ -155,6 +347,15 @@ def _size_words(opts: dict, width: int) -> str:
 TRACKS = loss("Only one sound track is kept", "tracks", affects=("audio_tracks",))
 
 
+def _rate_it_takes(args: list[str], src: Path) -> list[str]:
+    """Sound finer than the encoder takes, brought down to what it does (DSD leaves FFmpeg at 352.8 kHz)."""
+    top = TOP_RATE.get(args[args.index("-c:a") + 1]) if "-c:a" in args else None
+    if not top or probe(src)["rate"] <= top:
+        return args
+    note(f"Sound brought down to {top / 1000:g} kHz, the finest this format holds")
+    return [*args, "-ar", str(top)]
+
+
 def _audio_notes(src: str, dst: str, opts: dict) -> list:
     out = [TRACKS]
     if dst == "m4r":
@@ -164,10 +365,28 @@ def _audio_notes(src: str, dst: str, opts: dict) -> list:
     return out
 
 
-@converter(inputs=AUDIO_IN | VIDEO_IN, outputs=AUDIO, engine="ffmpeg", notes=_audio_notes,
-           options=lambda s, d: ("bitrate",) if d in LOSSY_AUDIO else ())
+SOUND_SETTINGS = ("start", "end", "loudness")
+SIZED_AUDIO = LOSSY_AUDIO - {"m4r", "amr"}  # a ringtone and phone sound have their own fixed size
+
+
+def _audio_settings(src: str, dst: str) -> tuple:
+    return (("bitrate",) if dst in LOSSY_AUDIO else ()) + SOUND_SETTINGS + (("target_size",) if dst in SIZED_AUDIO else ())
+
+
+@converter(inputs=AUDIO_IN | VIDEO_IN, outputs=AUDIO, engine="ffmpeg", notes=_audio_notes, options=_audio_settings, same=True)
 def to_audio(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    ffmpeg(src, dst, ["-vn", *audio_args(dst_fmt)])
+    args = _rate_it_takes(audio_args(dst_fmt), src)
+    if not (option("start") or option("end") or option("loudness") or option("target_size")):
+        ffmpeg(src, dst, ["-vn", *args])
+        return
+    info = probe(src)
+    before, cut = _cut(info, video=False)
+    length = _span(info)[1] if cut or before else info["duration"]
+    if option("target_size") and dst_fmt in SIZED_AUDIO:
+        args = _fit_audio(args, length, dst_fmt)
+    if option("loudness"):
+        args = _with_audio_filters(args, _loudnorm(src, info, before, cut))
+    ffmpeg(src, dst, [*cut, "-vn", *args], before)
 
 
 def _video_notes(src: str, dst: str, opts: dict) -> list:
@@ -181,27 +400,109 @@ def _video_notes(src: str, dst: str, opts: dict) -> list:
 
 
 VIDEO_SETTINGS = ("video_quality", "video_size", "fps")
+SIZED_VIDEO = {f for f, a in VIDEO_ARGS.items() if a[a.index("-c:v") + 1] in TWO_PASS}
 
 
-@converter(inputs=VIDEO_IN, outputs=VIDEO, engine="ffmpeg", notes=_video_notes, options=VIDEO_SETTINGS)
+def _video_settings(src: str, dst: str) -> tuple:
+    return VIDEO_SETTINGS + SOUND_SETTINGS + (("target_size",) if dst in SIZED_VIDEO else ())
+
+
+@converter(inputs=VIDEO_IN, outputs=VIDEO, engine="ffmpeg", notes=_video_notes, options=_video_settings, same=True)
 @converter(inputs={"gif"}, outputs=VIDEO, engine="ffmpeg", terminal=True,  # no gif -> video -> "audio"
            notes=_video_notes, options=VIDEO_SETTINGS)
 def to_video(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    ffmpeg(src, dst, video_args(dst_fmt))
+    args = video_args(dst_fmt)
+    if src_fmt != "gif":
+        args = _rate_it_takes(args, src)
+    if src_fmt == "gif" or not (option("start") or option("end") or option("loudness") or option("target_size")):
+        ffmpeg(src, dst, args)
+        return
+    info = probe(src)
+    before, cut = _cut(info, video=True)
+    length = _span(info)[1] if cut or before else info["duration"]
+    first = None
+    if option("target_size") and dst_fmt in SIZED_VIDEO:
+        args, first = _fit_video(args, info, length, dst)
+    if option("loudness") and info.get("audio"):
+        args = _with_audio_filters(args, _loudnorm(src, info, before, cut))
+    if first:
+        ffmpeg(src, "-", [*cut, *first], before)
+    ffmpeg(src, dst, [*cut, *args], before)
 
 
-@converter(inputs=VIDEO_IN, outputs={"gif"}, engine="ffmpeg", options=("fps", "video_size"),
+@converter(inputs=VIDEO_IN, outputs={"gif"}, engine="ffmpeg", options=("fps", "video_size", "start", "end"),
            notes=lambda s, d, o: [loss(f"GIF animations run at {o.get('fps') or GIF_FPS} frames a second, "
                                        f"{_size_words(o, GIF_WIDTH)}, with 256 colors and no sound", "colors",
                                        weight=0, affects=("width", "height", "frames"))])
 def to_gif(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    ffmpeg(src, dst, _gif_args())
+    before, cut = _cut(probe(src), video=True) if option("start") or option("end") else ([], [])
+    ffmpeg(src, dst, [*cut, *_gif_args()], before)
 
 
 @converter(inputs=VIDEO_IN, outputs={"webp"}, engine="ffmpeg", terminal=True,  # animated: don't chain on
-           options=("fps", "video_size"),
+           options=("fps", "video_size", "start", "end"),
            notes=lambda s, d, o: [loss(f"Animated WebP runs at {o.get('fps') or WEBP_FPS} frames a second, "
                                        f"{_size_words(o, WEBP_WIDTH)}, with no sound", weight=0,
                                        affects=("width", "height", "frames"))])
 def to_animated_webp(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    ffmpeg(src, dst, _webp_args())
+    before, cut = _cut(probe(src), video=True) if option("start") or option("end") else ([], [])
+    ffmpeg(src, dst, [*cut, *_webp_args()], before)
+
+
+# ---- joining several files into one (pipeline.join)
+
+def _without(args: list[str], *flags: str) -> list[str]:
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a in flags:
+            skip = True
+        else:
+            out.append(a)
+    return out
+
+
+def join(srcs: list[Path], dst: Path, dst_fmt: str) -> float:
+    """Join srcs end to end into dst (a sound or video format). Pictures are fitted into the first
+    video's size (bars where the shape differs) at its frame rate; sound is made 48 kHz stereo.
+    Returns the length the result should have."""
+    infos = [probe(s) for s in srcs]
+    video = dst_fmt in VIDEO
+    if video and not all("width" in i for i in infos):
+        raise ConversionError("Only videos can be joined into a video: one of these is sound only")
+    first = next((i for i in infos if "width" in i), {})
+    w, h = (first.get("width", 1280) + 1) // 2 * 2, (first.get("height", 720) + 1) // 2 * 2
+    fps = float(option("fps") or first.get("fps") or 30.0)
+    pictures, sounds, silent = [], [], []  # silent: inputs of silence for the videos without sound
+    for n, info in enumerate(infos):
+        pictures.append(f"[{n}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,"
+                        f"setsar=1,fps={fps:g},format=yuv420p[v{n}]")
+        if info["audio"]:
+            sounds.append(f"[{n}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{n}]")
+        else:
+            silent += ["-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo:d={max(info['duration'], 0.04):.3f}"]
+            sounds.append(f"[{len(srcs) + len(silent) // 4 - 1}:a]aformat=sample_fmts=fltp:channel_layouts=stereo[a{n}]")
+    n = len(srcs)
+    sound_only = ";".join([*sounds, "".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[a]"])
+    afilter = []
+    if option("loudness"):
+        measured = _loudnorm(list(srcs), {"rate": 48000}, [], [], [*silent, "-filter_complex", sound_only], "a")
+        afilter = [f for f in measured if not f.startswith("aresample")]
+    tail = f";[j]{','.join(afilter)},aresample=48000[a]" if afilter else ""
+    out_a = "[j]" if afilter else "[a]"
+    if video:
+        size = option("video_size")
+        scale = f";[c]{_short_side(int(str(size).rstrip('p')))}[v]" if size else ""
+        graph = ";".join([*pictures, *sounds, "".join(f"[v{i}][a{i}]" for i in range(n))
+                          + f"concat=n={n}:v=1:a=1{'[c]' if size else '[v]'}{out_a}"]) + scale + tail
+        args = _without(video_args(dst_fmt), "-vf")  # a -vf can't follow a filter graph: it's in the graph
+        maps = ["-map", "[v]", "-map", "[a]"]
+    else:
+        graph = ";".join([*sounds, "".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1{out_a}"]) + tail
+        args = audio_args(dst_fmt)
+        maps = ["-map", "[a]"]
+    ffmpeg(list(srcs), dst, [*silent, "-filter_complex", graph, *maps, *args])
+    total = sum(i["duration"] for i in infos)
+    expect("duration", round(total, 3), f"{n} files joined", within=0.1 + 0.05 * n)
+    return total

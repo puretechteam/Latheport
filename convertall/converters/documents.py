@@ -117,8 +117,8 @@ def html_to_writer(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
 _PDF_REBUILT = [loss("The PDF is rebuilt as editable text: the layout may shift", weight=0)]
 
 
-# LibreOffice opens a PDF as positioned text boxes. Pandoc reads those from DOCX but skips them in
-# ODT, so an ODT made from a PDF is an end result: routes onward (to Markdown, LaTeX...) take DOCX.
+# LibreOffice opens a PDF as positioned text boxes, which come through a DOCX better than an ODT:
+# an ODT made from a PDF is an end result, and routes onward (to Markdown, LaTeX...) take DOCX.
 @converter(inputs={"pdf"}, outputs={"docx"}, engine="libreoffice", cost=2, first_only=True,
            notes=lambda s, d, o: _PDF_REBUILT)
 @converter(inputs={"pdf"}, outputs={"odt"}, engine="libreoffice", cost=2, terminal=True,

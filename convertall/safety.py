@@ -152,21 +152,6 @@ def read_capped(fin, label: str, limit: int | None = None) -> bytes:
     return data
 
 
-def local_file(base: Path, link: str) -> Path | None:
-    """A file a document links to (a picture, an included file), when it's in the document's own
-    folder or one level up (Text/ next to Images/). Absolute, network and further-out paths, and
-    links with a scheme (http:, file:), give None."""
-    from urllib.parse import unquote
-    link = unquote(link.split("#", 1)[0].split("?", 1)[0]).replace("\\", "/")
-    if not link or link.startswith("/") or re.match(r"[A-Za-z][\w+.-]*:", link):
-        return None
-    base = base.resolve()
-    path = (base / link).resolve()
-    if not path.is_relative_to(base.parent) or not path.is_file():
-        return None
-    return path
-
-
 def _is_link(entry: os.DirEntry) -> bool:
     st = entry.stat(follow_symlinks=False)
     return (entry.is_symlink() or stat.S_ISLNK(st.st_mode)

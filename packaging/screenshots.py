@@ -1,11 +1,11 @@
 """The README's pictures, taken from the real window (never mocked up), with sample files made
 here (never anyone's own):
 
-    .venv\\Scripts\\python packaging\\screenshots.py [BIG_ARCHIVE]
+    .venv\\Scripts\\python packaging\\screenshots.py [BIG_ARCHIVE | --promo]
 
-- screenshots/convertall.png: the window, dark, extracting a big archive, beside the release: its
-  download against the last one's (DOWNLOAD, measured from the zips) and what's new (NEW). It heads
-  the README and is the picture for the release's post.
+- screenshots/convertall.png: the window, dark, with a video to cut and fit in 10 MB, beside the
+  release: the engines it no longer needs (GONE), measured times against the last one (TIMES) and
+  what's new (NEW). It heads the README and is the picture for the release's post.
 - screenshots/after_converting_{light,dark}.png: a two-part GLB made into an STL, with Details open
 - screenshots/extracting_{light,dark}.png: a big archive unpacking, megabytes done and Cancel
 
@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 OUT = ROOT / "screenshots"
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSettings, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSettings, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -43,16 +43,18 @@ from PySide6.QtWidgets import QApplication
 
 from convertall import __version__, gui, registry
 
-NEW = ["No 7-Zip needed: every archive is read built in", "Cancel any time, and a safe close",
-       "Disk images too: VHD, VMDK, DMG and more"]
-# the release zip, measured (MB): the one before, and this one
-DOWNLOAD = [("1.2.0", 179.1), (__version__, 81.7)]
+NEW = ["Cut, fit in a size, even out loudness, join", "Watch folders, and a queue for what you drop"]
+GONE = "No ImageMagick, Pandoc or DjVuLibre: 330 MB less to install"
+# seconds against 1.3.0 with those engines, same files, same PC, the two taking turns on each file, best of 3: what, before, now
+TIMES = [("20 DjVu books to PDF", 388.8, 28.9), ("Markup files to HTML", 8.18, 1.43), ("12 RAW photos to PNG", 91.7, 59.0)]
 
 
 def pump(app, until, seconds: float) -> bool:
     deadline = time.monotonic() + seconds
     while not until() and time.monotonic() < deadline:
         app.processEvents()
+        # processEvents leaves these for the event loop proper: rows replaced would stay on screen
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         time.sleep(0.01)
     return until()
 
@@ -151,9 +153,40 @@ def after_converting(app, theme: str, model: Path, work: Path) -> QImage:
             p.unlink()
 
 
+def long_video(work: Path) -> Path:
+    """Six minutes of FFmpeg's test picture and tone at 720p, big enough (about 130 MB) that fitting it in 10 MB makes sense."""
+    from convertall import engines
+    path = work / "talk.mp4"
+    engines.run([engines.find("ffmpeg"), "-hide_banner", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24:duration=360",
+                 "-f", "lavfi", "-i", "sine=frequency=330:duration=360", "-vf", "noise=alls=12:allf=t", "-c:v", "libx264",
+                 "-preset", "ultrafast", "-b:v", "2800k", "-threads", "4", "-c:a", "aac", "-shortest", str(path)])
+    return path
+
+
+def cutting(app, theme: str, video: Path, work: Path) -> QImage:
+    """The window with a video to cut and fit in 10 MB, its Options open."""
+    w = window(app, theme, work)
+    try:
+        w.set_files([video])
+        pump(app, lambda: False, 0.5)
+        w.picker.set_current("mp4")
+        pump(app, lambda: False, 0.2)
+        panel = w.options_panel
+        panel.head.click()
+        pump(app, lambda: False, 0.3)
+        for key, value in (("start", "1:30"), ("end", "5:00"), ("target_size", 10)):
+            panel.widgets[key].setValue(value)
+        pump(app, lambda: False, 0.5)
+        return w.grab().toImage()
+    finally:
+        settle(app)
+        w.close()
+        settle(app)
+
+
 def promo(shot: QImage) -> QImage:
-    """1600 x 900 (an X post's picture, and the top of the README): the window part-way through an
-    archive on the left; on the right the release, its download beside the last one's, and what's new."""
+    """1600 x 900 (an X post's picture, and the top of the README): the real window on the left; on the
+    right the release, the engines it no longer needs, its times beside the last one's, and what's new."""
     dark = gui.DARK
     img = QImage(1600, 900, QImage.Format_RGB32)
     p = QPainter(img)
@@ -171,7 +204,7 @@ def promo(shot: QImage) -> QImage:
     p.fillRect(img.rect(), glow)
     # the window, scaled to fit, on a card
     scaled = shot.scaled(640, 760, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    x, y = 80, (900 - scaled.height()) // 2
+    x, y = (780 - scaled.width()) // 2, (900 - scaled.height()) // 2
     card = QPainterPath()
     card.addRoundedRect(QRectF(x - 1, y - 1, scaled.width() + 2, scaled.height() + 2), 18, 18)
     p.fillPath(card, QColor(dark["border"]))
@@ -211,29 +244,33 @@ def promo(shot: QImage) -> QImage:
     outs = {e.dst for es in registry._edges.values() for e in es}
     text(f"{len(ins)} formats in, {len(outs)} out. Free and open source, for Windows.", 22, dark["muted"],
          QPoint(left, 244))
-    # the download, then and now
-    text("THE DOWNLOAD", 17, dark["muted"], QPoint(left, 330), QFont.DemiBold)
-    biggest = max(mb for _v, mb in DOWNLOAD)
-    for k, (version, mb) in enumerate(DOWNLOAD):
-        top = 372 + 70 * k
-        now = version == __version__
-        text(version, 24, dark["text"] if now else dark["muted"], QPoint(left, top + 4), QFont.DemiBold, 90)
-        bar = QPainterPath()
-        bar.addRoundedRect(QRectF(left + 96, top + 6, 500 * mb / biggest, 34), 8, 8)
-        p.fillPath(bar, accent if now else QColor(dark["border"]))
-        text(f"{mb:.0f} MB", 28, dark["text"] if now else dark["muted"],
-             QPoint(left + 96 + int(500 * mb / biggest) + 16, top + 2), QFont.Bold if now else QFont.DemiBold, 160)
-    text(f"{100 * (1 - DOWNLOAD[-1][1] / DOWNLOAD[0][1]):.0f}% smaller", 22, dark["accent"], QPoint(left + 96, 512),
-         QFont.DemiBold)
+    # the engines gone, then the times, before and now
+    text(GONE, 24, dark["accent"], QPoint(left, 300), QFont.DemiBold)
+    text("SECONDS, 1.3.0 AND ITS ENGINES AGAINST " + __version__, 17, dark["muted"], QPoint(left, 356), QFont.DemiBold)
+
+    def seconds(v: float) -> str:
+        return f"{v:.1f} s" if v >= 1 else f"{v:.2f} s"
+
+    for k, (what, before, now) in enumerate(TIMES):
+        top = 390 + 92 * k
+        text(what, 21, dark["text"], QPoint(left, top), QFont.DemiBold)
+        for j, (v, colour) in enumerate(((before, QColor(dark["border"])), (now, accent))):
+            bar = QPainterPath()
+            width = max(6.0, 500 * v / before)
+            bar.addRoundedRect(QRectF(left, top + 32 + 24 * j, width, 18), 5, 5)
+            p.fillPath(bar, colour)
+            text(seconds(v), 17, dark["muted"] if j == 0 else dark["text"], QPoint(left + int(width) + 12, top + 29 + 24 * j),
+                 QFont.Normal if j == 0 else QFont.Bold, 160)
+        text(f"{round(before / now, 1):g}x", 32, dark["accent"],
+             QPoint(left + 590, top + 26), QFont.Bold, 130, Qt.AlignRight)
     p.setPen(QPen(QColor(dark["border"]), 2))
-    p.drawLine(left, 572, 1520, 572)
-    text(f"ALSO NEW IN {__version__}", 17, dark["muted"], QPoint(left, 598), QFont.DemiBold)
+    p.drawLine(left, 672, 1520, 672)
     for k, line in enumerate(NEW):
         p.setBrush(accent)
         p.setPen(Qt.NoPen)
-        p.drawEllipse(QPoint(left + 6, 655 + 48 * k), 5, 5)
-        text(line, 26, dark["text"], QPoint(left + 28, 637 + 48 * k))
-    text("github.com/puretechteam/ConvertAll", 24, dark["accent"], QPoint(left, 806))
+        p.drawEllipse(QPoint(left + 6, 711 + 42 * k), 5, 5)
+        text(line, 24, dark["text"], QPoint(left + 28, 695 + 42 * k))
+    text("github.com/puretechteam/ConvertAll", 24, dark["accent"], QPoint(left, 790))
     p.end()
     return img
 
@@ -255,10 +292,9 @@ def one(kind: str, theme: str, src: Path, work: Path) -> None:
 
 def _one(app, kind: str, theme: str, src: Path, work: Path) -> None:
     if kind == "extracting":
-        shot = extracting(app, theme, src, work)
-        shot.save(str(OUT / f"extracting_{theme}.png"))
-        if theme == "dark":
-            promo(shot).save(str(OUT / "convertall.png"))
+        extracting(app, theme, src, work).save(str(OUT / f"extracting_{theme}.png"))
+    elif kind == "cutting":
+        promo(cutting(app, theme, src, work)).save(str(OUT / "convertall.png"))
     else:
         after_converting(app, theme, src, work).save(str(OUT / f"after_converting_{theme}.png"))
 
@@ -269,6 +305,10 @@ def main() -> int:
     from samples import Samples
     if len(sys.argv) > 1 and sys.argv[1] == "--one":
         one(sys.argv[2], sys.argv[3], Path(sys.argv[4]), Path(sys.argv[5]))
+        return 0
+    if len(sys.argv) > 1 and sys.argv[1] == "--promo":  # only the release's picture
+        with tempfile.TemporaryDirectory(prefix="convertall-shots-") as tmp:
+            subprocess.run([sys.executable, __file__, "--one", "cutting", "dark", str(long_video(Path(tmp))), tmp], check=True)
         return 0
     with tempfile.TemporaryDirectory(prefix="convertall-shots-") as tmp:
         work = Path(tmp)
@@ -286,6 +326,7 @@ def main() -> int:
         for theme in ("light", "dark"):
             for kind, src in (("extracting", archive), ("after_converting", bracket)):
                 subprocess.run([sys.executable, __file__, "--one", kind, theme, str(src), str(work)], check=True)
+        subprocess.run([sys.executable, __file__, "--one", "cutting", "dark", str(long_video(work)), str(work)], check=True)
     for p in sorted(OUT.glob("*.png")):
         img = QImage(str(p))
         print(f"{p.name}: {img.width()} x {img.height()}, {p.stat().st_size // 1024} KB")

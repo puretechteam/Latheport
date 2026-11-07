@@ -6,6 +6,7 @@ import pytest
 import yaml
 from PIL import Image
 
+from convertall.assurance import Report
 from convertall.errors import ConversionError
 from convertall.pipeline import convert, extract
 
@@ -22,6 +23,19 @@ def test_image_formats(png, fmt):
     with Image.open(out) as img:
         img.load()
         assert img.width > 0
+
+
+def test_a_big_heic_gives_up_some_quality_to_open_again(tmp_path):
+    """Past about 16 MB of coded picture libde265, the decoder in pillow-heif and many apps, can't open what x265 wrote."""
+    np = pytest.importorskip("numpy")
+    pillow_heif = pytest.importorskip("pillow_heif")
+    src = tmp_path / "detail.png"
+    Image.fromarray(np.random.default_rng(1).integers(0, 256, (3450, 3450, 3), dtype=np.uint8)).save(src)
+    report = Report()
+    out = convert(src, "heic", out_dir=tmp_path, report=report)
+    assert len(pillow_heif.open_heif(out).data) == 3450 * 3450 * 3
+    assert not report.warnings, report.lines()
+    assert any("Quality lowered to" in n for n in report.notes), report.lines()
 
 
 def test_jpg_flattens_alpha_on_white(png):
@@ -276,16 +290,18 @@ def test_html_to_markdown(tmp_path):
 
 
 @needs("libreoffice")
-@needs("pandoc")
-@pytest.mark.parametrize("fmt", ["md", "org", "rst", "wiki", "adoc", "tex"])
+@pytest.mark.parametrize("fmt", ["md", "org", "rst", "wiki", "adoc", "tex", "typ", "dbk", "textile", "man"])
 def test_pdf_to_markup_keeps_the_text(tmp_path, fmt):
-    """LibreOffice opens a PDF as positioned text boxes, which Pandoc's ODT reader skips: these
-    routes used to come out empty. The text of both pages must arrive."""
+    """LibreOffice opens a PDF as positioned text boxes: routes through ODT used to come out empty.
+    The text of both pages must arrive (a markup file with pictures comes back as a folder)."""
     from convertall import Report
 
     from .samples import Samples
     report = Report()  # the window's way: the route is chosen with what this PDF holds
     out = convert(Samples(tmp_path / "s")("pdf"), fmt, out_dir=tmp_path / "out", report=report)
+    if out.is_dir():
+        assert (out / "images").is_dir()
+        out = next(out.glob(f"*.{fmt}"))
     text = out.read_text(encoding="utf-8")
     assert "page 1" in text and "page 2" in text
 

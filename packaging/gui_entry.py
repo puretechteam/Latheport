@@ -26,7 +26,16 @@ if len(sys.argv) > 1 and sys.argv[1] == "--cli":
             setattr(sys, name, open("CONOUT$", "w", encoding="utf-8", errors="replace"))  # noqa: SIM115
     from convertall.cli import main as cli_main
 
-    sys.exit(cli_main(sys.argv[2:]))
+    # an exception that leaves this file becomes a crash window, which would hold up a script
+    # until someone closes it: a terminal tool reports it on stderr and exits instead
+    try:
+        code = cli_main(sys.argv[2:])
+    except Exception:  # noqa: BLE001
+        import traceback
+
+        traceback.print_exc()
+        code = 1
+    sys.exit(code)
 
 from convertall.instance import main
 

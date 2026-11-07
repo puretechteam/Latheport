@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -131,3 +134,30 @@ def test_windows_1252_csv_converts(tmp_path):
     src = tmp_path / "excel.csv"
     src.write_bytes("name,city\r\nZoë,Zürich\r\n".encode("cp1252"))
     assert '"city": "Zürich"' in convert(src, "json").read_text(encoding="utf-8")
+
+
+ALL_ROUTES = """
+import hashlib
+from convertall import registry
+registry._ensure_loaded()
+routes = []
+for src in sorted(k for k in registry._edges if k != "*"):
+    for dst, r in sorted(registry.all_routes(src).items()):
+        routes.append(f"{src}>{dst}:" + ",".join(f"{e.dst}.{e.func.__name__}" for e in r.edges))
+print(len(routes), hashlib.sha256("\\n".join(routes).encode()).hexdigest())
+"""
+
+
+def test_a_conversion_goes_the_same_way_every_run():
+    """Python orders sets differently each run, and routes that tie went to whichever came first."""
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).parent.parent))
+    runs = {subprocess.run([sys.executable, "-c", ALL_ROUTES], env=dict(env, PYTHONHASHSEED=seed), capture_output=True,
+                           text=True, check=True).stdout for seed in ("1", "2", "3")}
+    assert len(runs) == 1
+    assert int(next(iter(runs)).split()[0]) > 10000  # it really compared the routes
+
+
+@pytest.mark.parametrize("dst", ["exr", "hdr", "jxl"])
+def test_a_tie_doesnt_go_through_a_lossy_picture(dst):
+    stops = [e.dst for e in registry.find_route("3g2", dst).edges[:-1]]
+    assert "gif" in stops and "jpg" not in stops

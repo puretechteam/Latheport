@@ -35,6 +35,9 @@ WILDCARD = "*"
 MAX_HOPS = 3
 MAX_CATEGORIES = 3  # json -> csv -> pdf -> png drifts too far to be useful
 MISSING_ENGINE_PENALTY = 10
+# kinds a file can be converted to its own format: sound and video are encoded again, to cut them,
+# make them smaller, fit them in a size or even out their loudness
+REENCODE = frozenset({"Audio", "Video"})
 
 
 @dataclass(frozen=True)
@@ -104,8 +107,10 @@ class Route:
 _edges: dict[str, list[Edge]] = defaultdict(list)
 
 
-def converter(inputs, outputs, engine=None, cost=1, terminal=False, first_only=False, notes=None, options=None):
-    """Register fn(src_path, dst_path, src_fmt, dst_fmt) for every inputs x outputs pair.
+def converter(inputs, outputs, engine=None, cost=1, terminal=False, first_only=False, notes=None, options=None,
+              same=False):
+    """Register fn(src_path, dst_path, src_fmt, dst_fmt) for every inputs x outputs pair (a format to
+    itself only when same: encoding sound or video again, see REENCODE).
 
     Use inputs={"*"} for "any file". The function may return a different path than
     dst_path (e.g. a folder of pages); otherwise dst_path is assumed. notes(src, dst, options)
@@ -116,9 +121,9 @@ def converter(inputs, outputs, engine=None, cost=1, terminal=False, first_only=F
         keys = tuple(options)
         options = lambda s, d: keys
     def deco(fn: ConvertFn) -> ConvertFn:
-        for i in inputs:
-            for o in outputs:
-                if i != o:
+        for i in sorted(inputs):  # sorted: a set's order changes from run to run
+            for o in sorted(outputs):
+                if i != o or same:
                     _edges[i].append(Edge(i, o, fn, engine, cost, terminal, first_only, notes, options))
         return fn
     return deco
@@ -128,6 +133,19 @@ def converter(inputs, outputs, engine=None, cost=1, terminal=False, first_only=F
 
 _options: contextvars.ContextVar[dict] = contextvars.ContextVar("options", default={})  # noqa: B039 - never mutated
 _found: contextvars.ContextVar[list | None] = contextvars.ContextVar("found", default=None)
+_expected: contextvars.ContextVar[list | None] = contextvars.ContextVar("expected", default=None)
+
+
+@dataclass(frozen=True)
+class Expect:
+    """What a step means a measured fact of the result to be (a trimmed length, a file size limit,
+    a loudness), checked afterwards: within ``within`` of ``value`` (or at most ``value`` when
+    ``at_most``), else a warning. ``why`` says what was asked for ("Cut to 0:30 to 1:45")."""
+    key: str
+    value: float
+    why: str
+    within: float = 0.0
+    at_most: bool = False
 
 
 def option(key: str, default=None):
@@ -144,14 +162,23 @@ def note(text: str) -> None:
         found.append(text)
 
 
-def running(options: dict, found: list) -> tuple:
+def expect(key: str, value: float, why: str, within: float = 0.0, at_most: bool = False) -> None:
+    """Say what a fact of this conversion's result should be (see Expect); the check measures it."""
+    expected = _expected.get()
+    if expected is not None:
+        expected[:] = [e for e in expected if e.key != key]
+        expected.append(Expect(key, value, why, within, at_most))
+
+
+def running(options: dict, found: list, expected: list | None = None) -> tuple:
     """Set the settings and the findings list for the steps about to run; reset(tokens) undoes it."""
-    return _options.set(dict(options)), _found.set(found)
+    return _options.set(dict(options)), _found.set(found), _expected.set(expected)
 
 
 def reset(tokens: tuple) -> None:
     _options.reset(tokens[0])
     _found.reset(tokens[1])
+    _expected.reset(tokens[2])
 
 
 # ---- what the check already read of the source (set by pipeline.convert): a book, a 3D scene or
@@ -205,13 +232,22 @@ def _rank(r: Route) -> tuple[int, int, int]:
     return r.cost, losses.cost(r.lost), len(r.edges)
 
 
+def _beats(a: Route, b: Route) -> bool:
+    """Whether a is the better route. Routes that tie come out the same on every run: JPG, the one
+    lossy stopover, comes last, then the stopovers' names decide."""
+    ra, rb = _rank(a), _rank(b)
+    if ra != rb:
+        return ra < rb
+    return [(e.dst == "jpg", e.dst) for e in a.edges[:-1]] < [(e.dst == "jpg", e.dst) for e in b.edges[:-1]]
+
+
 _route_cache: dict[tuple, dict[str, Route]] = {}
 
 
 def all_routes(src: str, held: frozenset[str] | None = None, options: dict | None = None) -> dict[str, Route]:
     """Cheapest route from src to every reachable format (layered search, <= MAX_HOPS). A route
     costs its steps plus what it loses for a file with these features (the format's usual ones
-    when None); a tie goes to the route that loses less, then to the shorter one."""
+    when None); a tie goes to the route that loses less, then to the shorter one (see _beats)."""
     _ensure_loaded()
     held = losses.typical(src) if held is None else frozenset(held)
     # A batch asks the same question for every file. The answer depends on which engines are
@@ -235,17 +271,18 @@ def _search(src: str, held: frozenset[str], options: dict | None) -> dict[str, R
             visited = {src} | {e.dst for e in route.edges}
             cats = {category(f) for f in visited}
             for edge in _out_edges(fmt, hop):
-                if edge.dst in visited or len(cats | {category(edge.dst)}) > MAX_CATEGORIES:
+                again = hop == 0 and edge.dst == src and category(src) in REENCODE
+                if edge.dst in visited and not again or len(cats | {category(edge.dst)}) > MAX_CATEGORIES:
                     continue
                 lost, kept = losses.step(edge.losses(options), edge.dst, route.held)
                 cand = Route(src, edge.dst, route.edges + [edge],
                              route.cost + edge.effective_cost() + losses.cost(lost), kept, route.lost + lost)
                 cur = best.get(edge.dst)
-                if cur is None or _rank(cand) < _rank(cur):
+                if cur is None or _beats(cand, cur):
                     best[edge.dst] = cand
-                if not edge.terminal:
+                if not edge.terminal and not again:
                     n = nxt.get(edge.dst)
-                    if n is None or _rank(cand) < _rank(n):
+                    if n is None or _beats(cand, n):
                         nxt[edge.dst] = cand
         frontier = nxt
     return best

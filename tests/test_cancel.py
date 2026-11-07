@@ -9,6 +9,8 @@ import time
 import zipfile
 
 import pytest
+import trimesh
+from PIL import Image
 
 from convertall import cancel, engines, pipeline, registry
 from convertall.converters import documents
@@ -86,6 +88,24 @@ def test_cancelled_engine_stops_within_one_second_of_cancel(tmp_path):
     took = time.monotonic() - when["cancel"]
     t.join()
     assert took < 1.0, f"engine took {took:.2f} s to stop"
+
+
+def test_cancel_leaves_other_programs_alone(tmp_path):
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        cmd, pids = _slow_engine(tmp_path, True)
+        token = cancel.Token()
+        t = threading.Thread(target=lambda: (_wait_for(lambda: len(pids()) == 2, time.monotonic() + 10), token.cancel()))
+        t.start()
+        with cancel.using(token), pytest.raises(cancel.Cancelled):
+            engines.run(cmd)
+        t.join()
+        time.sleep(0.3)
+        assert not [p for p in pids() if _alive(p)]
+        assert other.poll() is None
+    finally:
+        other.kill()
+        other.wait()
 
 
 def test_engine_timeout_still_kills_and_raises(tmp_path):
@@ -234,3 +254,70 @@ def test_stopping_an_extraction_says_stopped_not_damaged(tmp_path, monkeypatch, 
     with cancel.using(_StopAfter(4)), pytest.raises(cancel.Cancelled) as info:
         pipeline.extract(arc, out_dir=tmp_path / "out")
     assert "damaged" not in str(info.value)
+
+
+# ---- closing the window while a background thread is busy
+
+CLOSE_DRIVER = r"""
+import os, sys, time
+from PySide6.QtCore import QSettings, QTimer
+from convertall import engines, gui, instance, updates, viewer
+what, flag, ini, wait = sys.argv[1:5]
+gui.QSettings = lambda *a: QSettings(ini, QSettings.IniFormat)
+
+def slow(*a, **k):
+    open(flag, "w").close()
+    time.sleep(float(wait))
+    return False
+
+gui._thumbnail = viewer.load_scene = engines.install = updates.latest = slow
+real_show, real_viewers = gui.Window.show, gui.Window.open_viewers
+
+def close_when_started():
+    if os.path.exists(flag):
+        for w in gui.QApplication.topLevelWidgets():
+            QTimer.singleShot(int(float(wait) * 1500) if float(wait) < 5 else 100, w.close)
+    else:
+        QTimer.singleShot(20, close_when_started)
+
+def viewers(self, paths):
+    real_viewers(self, paths)
+    close_when_started()
+
+def show(self):
+    real_show(self)
+    if what == "update":
+        self.check_updates()
+    elif what.startswith("install"):
+        dialog = gui.EnginesDialog(self)
+        dialog._install("gmsh", gui.QPushButton())
+        if what == "install, dialog closed":
+            dialog.deleteLater()
+    close_when_started()
+
+gui.Window.show, gui.Window.open_viewers = show, viewers
+sys.argv = sys.argv[:1] + sys.argv[5:]
+sys.exit(instance.main())
+"""
+
+
+@pytest.mark.parametrize("what, wait", [("thumbnail", 60), ("3D preview", 60), ("update", 60), ("install", 60),
+                                        ("install, dialog closed", 60), ("install, dialog closed", 0.5)])
+def test_closing_the_window_while_a_thread_is_busy_exits_cleanly(tmp_path, what, wait):
+    """Qt ends a program with a crash code when a thread is still running as it goes away."""
+    picture = tmp_path / "a.png"
+    Image.new("RGB", (8, 8)).save(picture)
+    model = tmp_path / "a.glb"
+    trimesh.creation.box().export(model)
+    files = {"thumbnail": [str(picture)], "3D preview": ["--view", str(model)]}.get(what, [])
+    flag, ini, script = tmp_path / "started", tmp_path / "settings.ini", tmp_path / "driver.py"
+    script.write_text(CLOSE_DRIVER, encoding="utf-8")
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", TEMP=str(tmp_path), TMP=str(tmp_path),
+               PYTHONPATH=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    r = subprocess.run([sys.executable, str(script), what, str(flag), str(ini), str(wait), *files], env=env,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=45, check=False)
+    assert flag.exists(), r.stderr[-400:]  # the slow part really ran, or this proves nothing
+    assert r.returncode == 0, f"exit {r.returncode:#x} {r.stderr[-400:]}"
+    assert "Traceback" not in r.stderr, r.stderr[-400:]
+    if what == "update":
+        assert "checked" in ini.read_text(encoding="utf-8")  # settings aren't lost by the quick way out

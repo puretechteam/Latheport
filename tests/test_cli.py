@@ -1,4 +1,9 @@
 import json
+import os
+import subprocess
+import sys
+
+import pytest
 
 from convertall import cli, engines
 from convertall.cli import main
@@ -52,7 +57,7 @@ def test_engines_install_never_crashes(monkeypatch, capsys):
     def no_winget(key, log=None):
         raise ConversionError("winget isn't available; install App Installer from the Microsoft Store")
     monkeypatch.setattr(engines, "install", no_winget)
-    assert main(["engines", "--install", "pandoc"]) == 1
+    assert main(["engines", "--install", "ffmpeg"]) == 1
     assert "winget isn't available" in capsys.readouterr().err
 
 
@@ -129,13 +134,17 @@ def test_a_damaged_archive_extracts_to_a_message(tmp_path, monkeypatch):
         raise AssertionError("no error")
 
 
-def test_engines_says_which_archive_decoders_are_in_use(monkeypatch, capsys):
+def test_engines_says_which_decoders_are_in_use(monkeypatch, capsys):
     import packport
+    from bookport.djvu import _accel as books
+    from pixport import _accel as pictures
     for compiled, words in ((True, "compiled decoders"), (False, "Python decoders")):
-        monkeypatch.setattr(packport, "accelerated", lambda c=compiled: c)
+        for module in (packport, books, pictures):
+            monkeypatch.setattr(module, "accelerated", lambda c=compiled: c)
         assert main(["engines"]) == 0
-        line = next(ln for ln in capsys.readouterr().out.splitlines() if ln.strip().startswith("packport"))
-        assert words in line
+        lines = capsys.readouterr().out.splitlines()
+        for name in ("packport", "bookport", "pixport"):
+            assert words in next(ln for ln in lines if ln.strip().startswith(name))
 
 
 def test_ctrl_c_stops_the_conversion_cleanly(tmp_path, monkeypatch, capsys):
@@ -163,3 +172,34 @@ def test_ctrl_c_stops_the_conversion_cleanly(tmp_path, monkeypatch, capsys):
     assert started == ["a.png"]
     assert "Stopped" in capsys.readouterr().err
     assert signal.getsignal(signal.SIGINT) is before  # put back afterwards
+
+
+def test_install_question_with_nobody_to_answer(monkeypatch, capsys):
+    """NUL passes for a terminal on Windows, and a window program can have no stdin at all: the
+    built exe showed a crash window for these, which held up the script that ran it."""
+    monkeypatch.setattr(engines, "install", lambda *a, **k: pytest.fail("installed without a yes"))
+    with open(os.devnull) as nul:
+        monkeypatch.setattr("sys.stdin", nul)
+        assert cli._ask_install(["ffmpeg"], assume_yes=False) is False
+    assert "-y" in capsys.readouterr().err
+    monkeypatch.setattr("sys.stdin", None)
+    assert cli._ask_install(["ffmpeg"], assume_yes=False) is False
+    assert "-y" in capsys.readouterr().err
+
+
+def test_terminal_tool_never_ends_in_a_crash_window():
+    """An exception that leaves gui_entry.py becomes a pop-up in the built exe, so --cli stops at it."""
+    code = ("import runpy, sys\n"
+            "import convertall.cli as c\n"
+            "def boom(argv): raise RuntimeError('boom')\n"
+            "c.main = boom\n"
+            "sys.argv = ['x', '--cli']\n"
+            "try:\n"
+            "    runpy.run_path('packaging/gui_entry.py', run_name='__main__')\n"
+            "except SystemExit as e:\n"
+            "    print('exit', e.code)\n"
+            "except BaseException as e:\n"
+            "    print('escaped', type(e).__name__)\n")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120, check=False)
+    assert r.stdout.strip() == "exit 1"
+    assert "boom" in r.stderr

@@ -322,6 +322,26 @@ def test_quality_and_max_size(tmp_path):
         assert img.size == (600, 450)
 
 
+@pytest.mark.parametrize("fmt", ["exr", "hdr"])
+@pytest.mark.parametrize("out", ["png", "tiff"])
+def test_colour_depth_of_a_picture_with_more_than_8_bits(samples, tmp_path, fmt, out):
+    src = samples(fmt)
+    default = pipeline.convert(src, out, tmp_path / "a")
+    eight = pipeline.convert(src, out, tmp_path / "b", options={"bit_depth": "8"})
+    if out == "png":  # the depth is the 25th byte of a PNG (under 8 when a palette will do)
+        assert default.read_bytes()[24] == 16 and eight.read_bytes()[24] <= 8
+    assert _size(eight) < _size(default)
+    assert has(notes(fmt, out, bit_depth="8"), "8 bits a channel")
+    assert not has(notes(fmt, out), "8 bits a channel")
+    assert "bit_depth" in registry.find_route(fmt, out).settings
+
+
+def test_colour_depth_is_a_choice_of_two():
+    assert options.SETTINGS["bit_depth"].check("8") == "8" and options.SETTINGS["bit_depth"].check("16") == "16"
+    with pytest.raises(ValueError):
+        options.SETTINGS["bit_depth"].check("10")
+
+
 def test_dpi(tmp_path):
     import pymupdf
     doc = pymupdf.open()

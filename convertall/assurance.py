@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
@@ -24,6 +25,7 @@ READ_LIMIT = 200 * 2**20     # bigger files aren't read again just to check them
 PIXEL_LIMIT = 64_000_000     # nor are bigger pictures decoded to look for transparency
 DATA_LIMIT = 50 * 2**20
 
+PIXPORT_READ = {"dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf", "xcf", "exr", "hdr", "jxl"}
 MESHPORT_READ = {"glb", "gltf", "fbx", "3ds", "usd", "usdz", "abc", "blend"}
 TRIMESH_READ = {"stl", "obj", "ply", "off", "3mf", "dae"}
 PAGED = {"pdf", "xps", "oxps"}
@@ -75,6 +77,8 @@ def _reader(fmt: str):
     cat = category(fmt)
     if fmt in images.READ or fmt in ("heic",):
         return _image
+    if fmt in PIXPORT_READ:
+        return _pixport
     if fmt in PAGED:
         return _pages
     if cat in ("Audio", "Video"):
@@ -104,6 +108,18 @@ def _reader(fmt: str):
     if fmt in ebooks.BOOKS:
         return _book
     return None
+
+
+def _pixport(path: Path, fmt: str) -> dict:
+    import numpy as np
+    import pixport
+    img = pixport.read(path, fmt)
+    px = img.pixels
+    facts = {"width": img.width, "height": img.height, "frames": 1, "photo_info": bool(img.metadata.get("exif"))}
+    if px.ndim == 3 and px.shape[2] in (2, 4):
+        facts["transparency"] = bool(np.min(px[:, :, -1]) < 1.0)
+    registry.keep(path, fmt, "pixport", img)  # decoded already: the conversion needn't again
+    return facts
 
 
 def _image(path: Path, fmt: str) -> dict:
@@ -379,7 +395,9 @@ NAMES = {"pages": "Pages", "frames": "Frames", "duration": "Length", "width": "W
          "transparency": "Transparency", "parts": "Parts", "triangles": "Triangles", "size": "Size",
          "animation": "Animation", "rig": "Skeleton or blend shapes", "tables": "Tables", "records": "Records",
          "cues": "Subtitles", "glyphs": "Glyphs", "fonts": "Fonts", "files": "Files", "places": "Places",
-         "tracks": "Tracks", "audio_tracks": "Sound tracks", "words": "Words"}
+         "tracks": "Tracks", "audio_tracks": "Sound tracks", "words": "Words", "file_size": "File size",
+         "loudness": "Loudness"}
+UNITS = {"duration": " s", "file_size": " MB", "loudness": " LUFS"}
 # facts that should come through a conversion unchanged, and how close counts as the same
 SAME = {"pages": 0, "frames": 0, "width": 0, "height": 0, "parts": 0, "triangles": 0, "tables": 0,
         "records": 0, "cues": 0, "glyphs": 0, "fonts": 0, "files": 0, "places": 0, "tracks": 0,
@@ -428,10 +446,51 @@ def _close(key: str, a, b) -> bool:
     return a == b
 
 
+def loudness(path: Path) -> float | None:
+    """Integrated loudness (EBU R128, LUFS) of a sound or video file, measured by FFmpeg."""
+    ff = engines.find("ffmpeg")
+    if not ff:
+        return None
+    out = subprocess.run([ff, "-hide_banner", "-nostdin", "-protocol_whitelist", "file", "-i", str(path), "-vn",
+                          "-af", "ebur128=framelog=quiet", "-f", "null", "-"], capture_output=True, text=True,
+                         encoding="utf-8", errors="replace", check=False, timeout=900, creationflags=engines.NO_WINDOW,
+                         stdin=subprocess.DEVNULL)
+    found = re.findall(r"\bI:\s*(-?[\d.]+|-inf) LUFS", out.stderr)
+    return float(found[-1]) if found and found[-1] != "-inf" else None
+
+
+def measure_expected(path: Path, after: dict | None, expected) -> dict | None:
+    """after, with the facts the expectations ask about that aren't measured for every file."""
+    if not expected or after is None:
+        return after
+    after = dict(after)
+    for e in expected:
+        if e.key == "file_size" and "file_size" not in after:
+            after["file_size"] = round(Path(path).stat().st_size / 2**20, 2)
+        elif e.key == "loudness" and "loudness" not in after:
+            value = loudness(path)
+            if value is not None:
+                after["loudness"] = round(value, 1)
+    return after
+
+
+def _expected_check(e, before: dict, after: dict) -> Check | None:
+    if e.key not in after:
+        return None
+    got = after[e.key]
+    ok = got <= e.value + e.within if e.at_most else abs(got - e.value) <= e.within
+    unit = UNITS.get(e.key, "")
+    want = f"at most {show(e.value)}{unit}" if e.at_most else f"{show(e.value)}{unit}"
+    if ok:
+        return Check(NAMES[e.key], before.get(e.key), got, "expected", e.why)
+    return Check(NAMES[e.key], before.get(e.key), got, "warning", f"{e.why}: it should be {want}")
+
+
 def verify(before: dict | None, after: dict | None, lost: list[Loss], found: list[str] = (),
-           video: bool = False) -> list[Check]:
+           video: bool = False, expected=()) -> list[Check]:
     """Compare a source's facts with its result's. lost: what the route said it would lose; found:
-    what the converters reported while running (those explain any count they touch)."""
+    what the converters reported while running (those explain any count they touch); expected:
+    what the steps meant some facts to become (registry.expect: a trim, a size, a loudness)."""
     if not before or not after:
         return []
     explains: dict[str, str] = {}
@@ -439,7 +498,12 @@ def verify(before: dict | None, after: dict | None, lost: list[Loss], found: lis
         for key in n.affects:
             explains.setdefault(key, n.text)
     checks: list[Check] = []
-    for key in [k for k in NAMES if k in before and k in after]:
+    meant = {e.key for e in expected}
+    for e in expected:
+        check = _expected_check(e, before, after)
+        if check:
+            checks.append(check)
+    for key in [k for k in NAMES if k in before and k in after and k not in meant]:
         a, b = before[key], after[key]
         if key in KEPT:
             if a and not b:

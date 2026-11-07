@@ -44,10 +44,6 @@ def step_name(cur: Path, base: str, dst_fmt: str) -> str:
     return f"{base}.{dst_fmt}"
 
 
-def plan(src: str | Path, dst_fmt: str, src_fmt: str | None = None, options: dict | None = None) -> Route:
-    return find_route(src_fmt or detect(src), dst_fmt, options=options)
-
-
 def convert(src: str | Path, dst_fmt: str, out_dir: str | Path | None = None,
             src_fmt: str | None = None, report: Report | None = None, options: dict | None = None) -> Path:
     """Convert src to dst_fmt. Returns the path written (a file, or a folder for multi-page output).
@@ -83,11 +79,12 @@ def convert(src: str | Path, dst_fmt: str, out_dir: str | Path | None = None,
         out.mkdir(parents=True, exist_ok=True)
         base = strip_ext(src)
         found: list[str] = []
+        expected: list[registry.Expect] = []
 
         # a library still holding a temp file open must not fail a conversion that already succeeded
         with tempfile.TemporaryDirectory(prefix="convertall-", ignore_cleanup_errors=True) as tmp:
             cur = src
-            tokens = registry.running(options, found)
+            tokens = registry.running(options, found, expected)
             try:
                 for i, edge in enumerate(route.edges):
                     cancel.check()
@@ -109,12 +106,12 @@ def convert(src: str | Path, dst_fmt: str, out_dir: str | Path | None = None,
             final = unique_path(out / cur.name)
             shutil.move(str(cur), str(final))
     if report is not None:
-        _fill(report, src, src_fmt, relabel, route, held, options, found, before, final)
+        _fill(report, src, src_fmt, relabel, route, held, options, found, before, final, expected)
     return final
 
 
 def _fill(report: Report, src: Path, src_fmt: str, relabel: str | None, route: Route, held, options: dict,
-          found: list[str], before: dict | None, final: Path) -> None:
+          found: list[str], before: dict | None, final: Path, expected=()) -> None:
     lost = route.explain(held, options)
     report.source, report.source_format, report.target = str(src), src_fmt, route.dst
     report.detected = "content" if relabel else "extension"
@@ -123,7 +120,9 @@ def _fill(report: Report, src: Path, src_fmt: str, relabel: str | None, route: R
     report.steps = [{"from": e.src, "to": e.dst, "tool": assurance.tool(e)} for e in route.edges]
     try:
         after = assurance.inspect(final, route.dst, words=bool(before and "words" in before))
-        report.checks = assurance.verify(before, after, lost, found, video=category(route.dst) == "Video")
+        after = assurance.measure_expected(final, after, expected)
+        report.checks = assurance.verify(before, after, lost, found, video=category(route.dst) == "Video",
+                                         expected=expected)
     except assurance.Unreadable as exc:
         report.checks = [assurance.Check("Opens", None, None, "error",
                                          f"the result doesn't open as {route.dst.upper()} ({exc})")]
@@ -134,6 +133,65 @@ def _fill(report: Report, src: Path, src_fmt: str, relabel: str | None, route: R
                                     all(assurance.NAMES.get(k) in same for k in n.affects if k in assurance.NAMES))]
     report.notes = list(dict.fromkeys(([relabel] if relabel else []) + [n.text for n in lost] + found))
     report.seconds = round(time.perf_counter() - report.started, 3)
+
+
+JOINABLE = ("Audio", "Video")
+
+
+def join(srcs: list[str | Path], dst_fmt: str, out_dir: str | Path | None = None, report: Report | None = None,
+         options: dict | None = None) -> Path:
+    """Join sound or video files end to end, in the order given, into one dst_fmt file named after the
+    first ("clip (joined).mp4"), next to it or in out_dir. The report, when given, has the check:
+    the result's length is the parts' lengths added up."""
+    from . import engines
+    from .converters import media
+    paths = [Path(s).resolve() for s in srcs]
+    if len(paths) < 2:
+        raise ConversionError("Joining needs two files or more")
+    for path in paths:
+        if not path.is_file():
+            raise ConversionError(f"{path} doesn't exist")
+        if category(detect(path)) not in JOINABLE:
+            raise ConversionError(f"{path.name} isn't a sound or video file: only those can be joined")
+    if dst_fmt not in media.AUDIO | media.VIDEO:
+        raise ConversionError(f"Files can be joined into a sound or video format, not {dst_fmt.upper()}")
+    if not engines.available("ffmpeg"):
+        raise EngineMissingError(["ffmpeg"])
+    try:
+        options = clean_options(options or {})
+    except ValueError as exc:
+        raise ConversionError(str(exc)) from None
+    out = Path(out_dir).resolve() if out_dir else paths[0].parent
+    out.mkdir(parents=True, exist_ok=True)
+    found: list[str] = []
+    expected: list[registry.Expect] = []
+    name = f"{strip_ext(paths[0])} (joined).{dst_fmt}"
+    with tempfile.TemporaryDirectory(prefix="convertall-", ignore_cleanup_errors=True) as tmp:
+        tokens = registry.running(options, found, expected)
+        try:
+            total = media.join(paths, Path(tmp) / name, dst_fmt)
+        finally:
+            registry.reset(tokens)
+        cancel.check()
+        final = unique_path(out / name)
+        shutil.move(str(Path(tmp) / name), str(final))
+    if report is not None:
+        report.source = str(paths[0])
+        report.source_format = detect(paths[0])
+        report.target, report.output = dst_fmt, str(final)
+        report.settings = {k: v for k, v in options.items() if k in ("video_quality", "video_size", "fps", "bitrate",
+                                                                  "loudness")}
+        report.steps = [{"from": "+".join(dict.fromkeys(detect(x) for x in paths)), "to": dst_fmt, "tool": "FFmpeg"}]
+        try:
+            after = assurance.measure_expected(final, assurance.inspect(final, dst_fmt), expected)
+            report.checks = assurance.verify({"duration": round(total, 3)}, after, [], found,
+                                             video=category(dst_fmt) == "Video", expected=expected)
+        except assurance.Unreadable as exc:
+            report.checks = [assurance.Check("Opens", None, None, "error",
+                                             f"the result doesn't open as {dst_fmt.upper()} ({exc})")]
+        report.notes = [f"{len(paths)} files joined, in this order: " + ", ".join(x.name for x in paths), *found]
+        report.seconds = round(time.perf_counter() - report.started, 3)
+    return final
 
 
 def can_extract(fmt: str) -> bool:

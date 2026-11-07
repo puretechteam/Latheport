@@ -92,6 +92,7 @@ _CATALOG = {
     "Markup": {
         "md": "Markdown", "html": "HTML", "mht": "Web archive", "tex": "LaTeX",
         "rst": "reStructuredText", "org": "Org mode", "adoc": "AsciiDoc", "wiki": "MediaWiki",
+        "typ": "Typst", "dbk": "DocBook", "man": "man page", "textile": "Textile",
     },
     "Font": {
         "ttf": "TrueType", "otf": "OpenType", "woff": "WOFF", "woff2": "WOFF2",
@@ -137,7 +138,8 @@ ALIASES = {
     "swm": "wim", "esd": "wim", "udeb": "deb", "appxbundle": "appx",
     "msixbundle": "msix", "apks": "apk", "xapk": "apk",
     "svgz": "svg", "epsf": "eps", "epsi": "eps", "dfxp": "ttml", "mhtml": "mht", "asciidoc": "adoc",
-    "latex": "tex", "ltx": "tex", "rest": "rst", "mediawiki": "wiki", "djv": "djvu",
+    "latex": "tex", "ltx": "tex", "rest": "rst", "mediawiki": "wiki", "djv": "djvu", "docbook": "dbk",
+    "asc": "adoc",
     "vcard": "vcf", "ical": "ics", "icalendar": "ics", "ifb": "ics", "otc": "ttc", "sami": "smi",
     "xml_ttml": "ttml", "prc": "mobi",
 }
@@ -164,7 +166,7 @@ COMMON_TARGETS = {
     "json": "csv", "yaml": "json", "toml": "json", "xml": "json", "ini": "json", "plist": "json",
     "jsonl": "json", "sqlite": "xlsx",
     "md": "pdf", "html": "pdf", "mht": "html", "tex": "pdf", "rst": "html", "org": "html",
-    "adoc": "html", "wiki": "html", "ipynb": "html", "djvu": "pdf", "ps": "pdf", "eps": "pdf",
+    "adoc": "html", "wiki": "html", "typ": "pdf", "dbk": "html", "man": "txt", "textile": "html", "ipynb": "html", "djvu": "pdf", "ps": "pdf", "eps": "pdf",
     "hwp": "pdf", "dbf": "xlsx", "chm": "pdf", "eml": "pdf", "msg": "pdf",
     "gpx": "kml", "kml": "gpx", "kmz": "kml", "geojson": "kml", "vcf": "csv", "ics": "csv",
     "sbv": "srt", "sub": "srt", "ttml": "srt", "smi": "srt", "m4r": "mp3", "dsf": "flac", "dff": "flac",

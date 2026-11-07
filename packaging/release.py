@@ -236,7 +236,7 @@ def main() -> int:
     # the zip holds one ConvertAll folder with ConvertAll.exe, convertall-cli.exe, _internal and
     # the licenses; deflate at its strongest
     import zipfile
-    zip_path = base.parent / (base.name + ".zip")  # not with_suffix: "1.3.0-windows" has a dot in it
+    zip_path = base.parent / (base.name + ".zip")  # not with_suffix: "1.4.0-windows" has a dot in it
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         for p in sorted(app.rglob("*")):
             z.write(p, p.relative_to(app.parent).as_posix())

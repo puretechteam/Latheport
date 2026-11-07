@@ -8,7 +8,10 @@
   convertall clip.mov --to gif --plan     show the route and what it can't keep, convert nothing
   convertall *.jpg --to webp --preset "Smaller for email and web"
   convertall photo.png --to jpg --quality 80 --json
+  convertall talk.mp4 --to mp4 --start 1:30 --end 5:00 --target-size 10
+  convertall part1.mp4 part2.mp4 --to mp4 --join   join videos (or sound) into one, in order
   convertall view model.fbx               look at a 3D model, in a window
+  convertall watch Downloads --to pdf     convert what lands in a folder (into Downloads/Converted)
   convertall presets                      list presets and settings
   convertall engines [--install KEY]      show / install conversion engines
 """
@@ -44,12 +47,17 @@ def _ask_install(keys: list[str], assume_yes: bool, out=None) -> bool:
     for key in keys:
         eng = engines.ENGINES[key]
         if not assume_yes:
-            if not sys.stdin.isatty():
-                print(f"{eng.name} is required. Re-run with -y to install it.", file=sys.stderr)
+            required = f"{eng.name} is required. Re-run with -y to install it."
+            if sys.stdin is None or not sys.stdin.isatty():  # the built exe can have no stdin at all
+                print(required, file=sys.stderr)
                 return False
             # the question goes to stderr, so --json output stays only JSON
             print(f"{eng.name} ({eng.size}) is needed for this. Install it now? [y/N] ", end="", file=sys.stderr, flush=True)
-            answer = input()
+            try:
+                answer = input()
+            except EOFError:  # NUL passes for a terminal on Windows, and has nothing to read
+                print(f"\n{required}", file=sys.stderr)
+                return False
             if answer.strip().lower() not in ("y", "yes"):
                 return False
         print(f"Installing {eng.name}...", file=out)
@@ -76,9 +84,13 @@ def cmd_engines(args) -> int:
         state = path if path else f"not installed  (convertall engines --install {eng.key}, {eng.size})"
         print(f"  {eng.name:<12} {state}")
     import packport
-    archives = ("compiled decoders (packport-native)" if packport.accelerated()
-                else "Python decoders (packport-native isn't installed: archives unpack more slowly)")
-    print(f"  {'packport':<12} {archives}")
+    from bookport.djvu import _accel as books
+    from pixport import _accel as pictures
+    for name, compiled, without in (("packport", packport.accelerated(), "archives unpack more slowly"),
+                                    ("bookport", books.accelerated(), "DjVu books take longer"),
+                                    ("pixport", pictures.accelerated(), "RAW photos take longer, and no JPEG XL")):
+        state = f"compiled decoders ({name}-native)" if compiled else f"Python decoders ({name}-native isn't installed: {without})"
+        print(f"  {name:<12} {state}")
     return 0
 
 
@@ -156,7 +168,7 @@ def cmd_plan(paths: list[Path], target: str, settings: dict, as_json: bool) -> i
 
 
 def cmd_convert(paths: list[Path], target: str | None, extract: bool, out: str | None, yes: bool,
-                settings: dict | None = None, as_json: bool = False) -> int:
+                settings: dict | None = None, as_json: bool = False, join: bool = False) -> int:
     """Ctrl+C stops the conversion as Cancel does in the window: at its next safe point, cleaned up
     (and the files after it aren't started). A second Ctrl+C stops at once."""
     token = cancel.Token()
@@ -170,12 +182,38 @@ def cmd_convert(paths: list[Path], target: str | None, extract: bool, out: str |
     previous = signal.signal(signal.SIGINT, stop)
     try:
         with cancel.using(token):
+            if join:
+                return _join(paths, target, out, yes, settings, as_json)
             return _convert_all(paths, target, extract, out, yes, settings, as_json)
     except cancel.Cancelled:
         print("Stopped: what was being converted wasn't saved", file=sys.stderr)
         return 130
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+def _join(paths: list[Path], target: str, out: str | None, yes: bool, settings: dict | None, as_json: bool) -> int:
+    info = sys.stderr if as_json else sys.stdout
+    for attempt in range(2):
+        try:
+            report = Report()
+            result = pipeline.join(paths, target, out, report=report, options=settings)
+        except EngineMissingError as exc:
+            if attempt == 0 and _ask_install(exc.engines, yes, info):
+                continue
+            _fail(paths[0], exc, "", as_json)
+            return 1
+        except (ConversionError, OSError) as exc:
+            _fail(paths[0], exc, "", as_json)
+            return 1
+        if as_json:
+            _emit(report.to_dict())
+        else:
+            print(f"{len(paths)} files -> {result}")
+            for note in report.lines()[1:]:
+                print(f"  {note}")
+        return 0
+    return 1
 
 
 def _convert_all(paths: list[Path], target: str | None, extract: bool, out: str | None, yes: bool,
@@ -230,8 +268,44 @@ def cmd_presets() -> int:
         print(f"  {name}{mine}: " + (", ".join(f"{k}={v}" for k, v in values.items()) or "ConvertAll's own settings"))
     print("\nSettings (each applies only where a conversion takes it; unset ones keep the defaults):")
     for st in options.SETTINGS.values():
-        kind = "|".join(st.choices) if st.choices else f"{st.low}-{st.high}"
+        kind = "|".join(st.choices) if st.choices else "seconds or m:ss" if st.time else f"{st.low}-{st.high}"
         print(f"  --{st.key.replace('_', '-'):<14} {kind:<34} {st.help}. Default: {st.auto}")
+    return 0
+
+
+def cmd_watch(folders: list[Path], target: str, settings: dict, as_json: bool) -> int:
+    """Convert what lands in the folders until Ctrl+C."""
+    from . import watch
+    watches = [watch.Watch(f.resolve(), target, settings) for f in folders]
+    info = sys.stderr if as_json else sys.stdout
+    for w in watches:
+        print(f"Watching {w.folder}: new files become {target.upper()} in {w.out}", file=info)
+    print("Files already there are left alone. Ctrl+C stops.", file=info, flush=True)
+    token = cancel.Token()
+
+    def convert(path: Path, w) -> None:
+        try:
+            with cancel.using(token):
+                report = Report()
+                result = pipeline.convert(path, w.target, w.out, report=report, options=w.options)
+        except cancel.Cancelled:
+            return
+        except Exception as exc:  # noqa: BLE001 - one odd file doesn't end a watch that runs for days
+            _fail(path, exc, "", as_json)
+            return
+        if as_json:
+            _emit(report.to_dict())
+        else:
+            print(f"{path.name} -> {result}", flush=True)
+            for note in report.lines()[1:]:
+                print(f"  {note}")
+
+    previous = signal.signal(signal.SIGINT, lambda *_: token.cancel())
+    try:
+        watch.run(watches, convert, lambda: token.cancelled)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    print("Stopped watching", file=info)
     return 0
 
 
@@ -272,6 +346,34 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "presets":
         return cmd_presets()
 
+    if argv and argv[0] == "watch":
+        p = argparse.ArgumentParser(prog="convertall watch", description="Convert the files that land in folders, "
+                                    "into a Converted folder inside each, until Ctrl+C")
+        p.add_argument("folders", nargs="+", help="folders to watch")
+        p.add_argument("--to", "-t", required=True, metavar="FORMAT", help="what new files become")
+        p.add_argument("--json", action="store_true", help="one JSON report per file on stdout")
+        p.add_argument("--preset", metavar="NAME", help="a named set of settings")
+        for st in options.SETTINGS.values():
+            if st.remember:
+                p.add_argument(f"--{st.key.replace('_', '-')}", dest=st.key, metavar="|".join(st.choices) or "N",
+                               help=f"{st.help} (default: {st.auto})")
+        a = p.parse_args(argv[1:])
+        folders = [Path(f) for f in a.folders]
+        missing = [str(f) for f in folders if not f.is_dir()]
+        if missing:
+            print(f"Not a folder: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        try:
+            settings = options.preset(a.preset) if a.preset else {}
+            settings.update(options.clean({k: getattr(a, k, None) for k in options.SETTINGS}))
+        except KeyError:
+            print(f"No preset named '{a.preset}'. Run 'convertall presets' to see them.", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        return cmd_watch(folders, normalize(a.to), settings, a.json)
+
     if argv and argv[0] == "view":
         p = argparse.ArgumentParser(prog="convertall view", description="Show 3D models in a window")
         p.add_argument("files", nargs="+", help="3D models or CAD parts")
@@ -294,12 +396,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-o", "--out", metavar="DIR", help="output folder (default: next to each input)")
     p.add_argument("-y", "--yes", action="store_true", help="install missing engines without asking")
     p.add_argument("--plan", action="store_true", help="show each file's route and what it can't keep; convert nothing")
+    p.add_argument("--join", action="store_true", help="join sound or video files into one --to file, in the order given")
     p.add_argument("--json", action="store_true", help="one JSON report per file on stdout (route, notes, checks)")
     group = p.add_argument_group("settings", "Each applies only where a conversion takes it; unset ones keep the "
                                              "defaults. 'convertall presets' lists them all.")
     group.add_argument("--preset", metavar="NAME", help='a named set of settings, e.g. "Smaller for email and web"')
     for st in options.SETTINGS.values():
-        group.add_argument(f"--{st.key.replace('_', '-')}", dest=st.key, metavar="|".join(st.choices) or "N",
+        group.add_argument(f"--{st.key.replace('_', '-')}", dest=st.key, metavar="|".join(st.choices) or ("TIME" if st.time else "N"),
                            help=f"{st.help} (default: {st.auto})")
     p.add_argument("--version", action="version", version=f"ConvertAll {__version__}")
     args = p.parse_args(argv)
@@ -325,8 +428,11 @@ def main(argv: list[str] | None = None) -> int:
             print("--plan needs --to FORMAT", file=sys.stderr)
             return 2
         return cmd_plan(paths, normalize(args.to), settings, args.json)
+    if args.join and (not args.to or len(paths) < 2):
+        print("--join needs --to FORMAT and two files or more", file=sys.stderr)
+        return 2
     return cmd_convert(paths, normalize(args.to) if args.to else None, args.extract, args.out, args.yes,
-                       settings, args.json)
+                       settings, args.json, args.join)
 
 
 if __name__ == "__main__":

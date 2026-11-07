@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,8 @@ class Setting:
     auto: str = "Auto"        # what "not set" does, shown in its place
     common: tuple[int, ...] = ()    # numbers most people pick, offered in the window's list
     slider: bool = False      # shown as a slider in the window (a number with no usual values)
+    time: bool = False        # a point in a recording: seconds, m:ss or h:mm:ss (kept as text, "1:30")
+    remember: bool = True     # kept for the next conversion and in presets (a trim is for this file only)
 
     def shown(self, choice: str) -> str:
         """A choice as the window shows it."""
@@ -37,7 +40,10 @@ class Setting:
         return choice if choice[:1].isdigit() else choice.capitalize()
 
     def check(self, value):
-        """value as this setting holds it (an int, or one of the choices); ValueError if it can't be."""
+        """value as this setting holds it (an int, one of the choices, or for a time "m:ss"); ValueError
+        if it can't be."""
+        if self.time:
+            return show_time(parse_time(value, self.label))
         if self.choices:
             v = str(value).strip().lower()
             if v not in self.choices:
@@ -52,11 +58,43 @@ class Setting:
         return n
 
 
+def parse_time(value, label: str = "Time") -> float:
+    """Seconds from "90", "90s", "1:30", "1:02:03.5" (or a number); ValueError for anything else."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value)
+    else:
+        text = str(value).strip().lower().removesuffix("s").strip()
+        m = re.fullmatch(r"(?:(\d{1,3}):)?(?:(\d{1,2}):)?(\d{1,6}(?:[.,]\d{1,3})?)", text)
+        if not m:
+            raise ValueError(f"{label} is a time like 90, 1:30 or 1:02:03")
+        parts = [p for p in (m[1], m[2]) if p is not None]
+        seconds = float(m[3].replace(",", "."))
+        if parts and seconds >= 60:
+            raise ValueError(f"{label} is a time like 90, 1:30 or 1:02:03")
+        for i, p in enumerate(reversed(parts)):
+            seconds += int(p) * 60 ** (i + 1)
+    if not 0 <= seconds <= 100 * 3600:
+        raise ValueError(f"{label} is a time from 0 to 100 hours")
+    return round(seconds, 3)
+
+
+def show_time(seconds: float) -> str:
+    """1:30, 1:02:03, 0:05.5: how a time is shown and kept."""
+    whole = int(seconds)
+    frac = round(seconds - whole, 3)
+    tail = f"{frac:.3f}".rstrip("0").rstrip(".")[1:] if frac else ""
+    h, rest = divmod(whole, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}{tail}" if h else f"{m}:{s:02d}{tail}"
+
+
 SETTINGS: dict[str, Setting] = {s.key: s for s in (
     Setting("quality", "Quality", "Picture quality for JPG, WebP, AVIF and HEIC: higher looks better, lower is smaller",
             1, 100, auto="Auto (92 for JPG)", slider=True),
     Setting("max_size", "Max size", "Scale pictures down so their longest side is at most this many pixels",
             16, 20000, unit=" px", auto="Original", common=(3840, 2560, 1920, 1280, 1024, 800, 640, 512, 256)),
+    Setting("bit_depth", "Colour depth", "Bits a channel in a PNG or TIFF of a RAW, EXR, HDR or XCF picture: 8 is about a third of the size, 16 keeps the finest steps of colour",
+            choices=("8", "16"), names=("8 bits (smaller)", "16 bits"), auto="As much as the picture has"),
     Setting("dpi", "Resolution", "How sharp PDF pages are drawn as pictures", 36, 1200, unit=" dpi", auto="150 dpi",
             common=(72, 96, 150, 200, 300, 600)),
     Setting("video_quality", "Video quality", "Smaller files, or better pictures", choices=("smaller", "balanced", "best"),
@@ -67,6 +105,15 @@ SETTINGS: dict[str, Setting] = {s.key: s for s in (
             common=(60, 30, 25, 24, 15, 12, 10)),
     Setting("bitrate", "Sound bitrate", "Kilobits a second for MP3, AAC, Ogg, Opus and other lossy sound",
             32, 512, unit=" kbps", auto="Format's own", common=(64, 96, 128, 160, 192, 256, 320)),
+    Setting("start", "Start at", "Cut the sound or video so it starts here (seconds, or m:ss)", auto="The beginning",
+            time=True, remember=False),
+    Setting("end", "End at", "Cut the sound or video so it ends here (seconds, or m:ss)", auto="The end",
+            time=True, remember=False),
+    Setting("target_size", "Fit in", "Make the video or sound file at most this big: 10 MB for Discord, 25 MB for email",
+            1, 4000, unit=" MB", auto="Any size", common=(8, 10, 25, 50, 100, 500)),
+    Setting("loudness", "Loudness", "Even out how loud it is (EBU R128), the way streaming services and TV do",
+            choices=("streaming", "broadcast"), names=("Even, for streaming (-14 LUFS)", "Even, for TV (-23 LUFS)"),
+            auto="As it is"),
     Setting("detail", "Mesh detail", "How finely CAD parts are cut into triangles: finer is smoother and bigger",
             choices=("coarse", "normal", "fine"), auto="Normal"),
     Setting("page_size", "Page size", "The page an ebook is laid out on when it becomes a PDF",
@@ -97,7 +144,14 @@ def clean(values: dict) -> dict:
         if key not in SETTINGS:
             raise ValueError(f"Unknown setting '{key}'")
         out[key] = SETTINGS[key].check(value)
+    if "start" in out and "end" in out and parse_time(out["end"]) <= parse_time(out["start"]):
+        raise ValueError("End at comes after Start at")
     return out
+
+
+def lasting(values: dict) -> dict:
+    """The settings that are kept for next time and in presets (not a trim, which is for one file)."""
+    return {k: v for k, v in values.items() if k not in SETTINGS or SETTINGS[k].remember}
 
 
 def applying(values: dict, keys) -> dict:
@@ -153,7 +207,7 @@ def save_preset(name: str, values: dict) -> None:
         raise ValueError("A preset needs a name")
     if any(_same(name, b) for b in PRESETS):
         raise ValueError(f"“{name}” is a built-in preset; pick another name")
-    values = clean(values)
+    values = lasting(clean(values))
     # everything else stays as it was, entries this version can't read included; "web" replaces "Web"
     presets = {k: v for k, v in _stored().items() if not _same(k, name)}
     presets[name] = values

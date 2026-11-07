@@ -25,10 +25,6 @@ def expected_error(src: str, dst: str) -> str | None:
     """Conversions these samples can't do, and the error the user sees instead."""
     if category(dst) == "Subtitle" and category(src) in ("Video", "Audio") and src not in SUB_CODEC:
         return "has no subtitle track"  # only some sample videos carry one
-    if src == "djvu" and dst == "txt":
-        return "no text layer"  # the sample is a picture, never OCRed
-    if src == "djvu" and dst == "dxf":
-        return "No vector shapes"  # scanned pages, like any scanned PDF
     return None
 
 

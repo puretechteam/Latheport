@@ -48,17 +48,6 @@ ENGINES: dict[str, Engine] = {e.key: e for e in [
         r"%ProgramFiles%\LibreOffice\program\soffice.exe",
         r"%ProgramFiles(x86)%\LibreOffice\program\soffice.exe",
     )),
-    Engine("imagemagick", "ImageMagick", "magick", "ImageMagick.ImageMagick", "~100 MB", (
-        r"%ProgramFiles%\ImageMagick-*\magick.exe",
-    )),
-    Engine("pandoc", "Pandoc", "pandoc", "JohnMacFarlane.Pandoc", "~200 MB", (
-        r"%LOCALAPPDATA%\Pandoc\pandoc.exe",
-        r"%ProgramFiles%\Pandoc\pandoc.exe",
-    )),
-    Engine("djvulibre", "DjVuLibre", "ddjvu", "DjVuLibre.DjView", "~30 MB", (
-        r"%ProgramFiles(x86)%\DjVuLibre\ddjvu.exe",
-        r"%ProgramFiles%\DjVuLibre\ddjvu.exe",
-    )),
     Engine("ghostscript", "Ghostscript", "gswin64c", "", "~65 MB", (
         os.path.join(ENGINE_HOME, "ghostscript", "bin", "gswin64c.exe"),
         r"%ProgramFiles%\gs\gs*\bin\gswin64c.exe",
