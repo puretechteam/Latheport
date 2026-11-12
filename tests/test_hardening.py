@@ -240,6 +240,57 @@ def test_programs_in_the_current_folder_are_never_used(tmp_path, monkeypatch):
         engines.refresh()
 
 
+def _chocolatey(tmp_path):
+    """Chocolatey's layout: choco.exe, a launcher (shim) in bin, the real program under lib."""
+    root = tmp_path / "chocolatey"
+    real = root / "lib" / "ffmpeg" / "tools" / "ffmpeg" / "bin" / "ffmpeg.exe"
+    real.parent.mkdir(parents=True)
+    (root / "bin").mkdir()
+    for p in (root / "choco.exe", root / "bin" / "ffmpeg.exe", real):
+        p.write_bytes(b"")
+    return root / "bin" / "ffmpeg.exe", real
+
+
+def _shim_says(monkeypatch, target):
+    asked = []
+
+    def run(args, **kw):
+        asked.append(args)
+        return subprocess.CompletedProcess(args, 0, f" Target: '{target}'\n Target exists: 'True'\n", "")
+    monkeypatch.setattr(engines.subprocess, "run", run)
+    return asked
+
+
+def test_ffmpeg_behind_a_chocolatey_shim_is_used_directly(tmp_path, monkeypatch):
+    """Through Chocolatey's launcher, FFmpeg started with no console (the editor's video decoders) gave no frames:
+    on a CI runner with Chocolatey's FFmpeg, 0 shown and the video "ended" at once. The program it starts is used."""
+    shim, real = _chocolatey(tmp_path)
+    asked = _shim_says(monkeypatch, real)
+    monkeypatch.setenv("PATH", str(shim.parent))
+    monkeypatch.setattr(engines, "_registry_path", lambda: "")
+    monkeypatch.setitem(engines.ENGINES, "catest", engines.Engine("catest", "Test", "ffmpeg", "", ""))
+    engines.refresh()
+    try:
+        assert engines.find("catest") == str(real)
+    finally:
+        engines.refresh()
+    assert [[a.lower() for a in args] for args in asked] == [[str(shim).lower(), "--shimgen-help"]]
+
+
+def test_a_program_outside_chocolatey_is_never_asked_about_a_shim(tmp_path, monkeypatch):
+    shim, real = _chocolatey(tmp_path)
+    asked = _shim_says(monkeypatch, real)
+    (shim.parent.parent / "choco.exe").unlink()  # a bin folder of something else
+    assert engines.behind_shim(str(shim)) == str(shim) and not asked
+    assert engines.behind_shim(str(real)) == str(real) and not asked
+
+
+def test_a_shim_whose_program_is_gone_is_used_as_it_is(tmp_path, monkeypatch):
+    shim, _real = _chocolatey(tmp_path)
+    _shim_says(monkeypatch, tmp_path / "gone" / "ffmpeg.exe")
+    assert engines.behind_shim(str(shim)) == str(shim)
+
+
 def test_ffmpeg_reads_local_files_only(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(engines, "require", lambda key: key)

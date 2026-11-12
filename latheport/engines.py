@@ -97,6 +97,25 @@ def which(exe: str) -> str | None:
     return None
 
 
+def behind_shim(path: str) -> str:
+    """The program a Chocolatey shim starts, else path itself. Chocolatey puts a small launcher in its bin folder
+    for each program; started with no console (as the editor's video decoders are), FFmpeg through it gave no
+    frames at all. Only a launcher in a bin folder with choco.exe beside it is asked (--shimgen-help names the
+    program it starts)."""
+    import re
+    folder = os.path.dirname(path)
+    root = os.path.dirname(folder)
+    if os.path.basename(folder).lower() != "bin" or not os.path.isfile(os.path.join(root, "choco.exe")):
+        return path
+    try:
+        out = subprocess.run([path, "--shimgen-help"], capture_output=True, text=True, timeout=15, check=False,
+                             stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return path
+    target = re.search(r"Target:\s*'([^']+)'", out or "")
+    return target.group(1) if target and os.path.isfile(target.group(1)) else path
+
+
 def find(key: str) -> str | None:
     if key in _cache:
         return _cache[key]
@@ -109,7 +128,9 @@ def find(key: str) -> str | None:
         _cache[key] = smart.find(key)
         return _cache[key]
     found = which(eng.exe)
-    if not found:
+    if found:
+        found = behind_shim(found)
+    else:
         for pattern in eng.paths:
             hits = sorted(glob.glob(os.path.expandvars(pattern)), reverse=True)
             if hits:
