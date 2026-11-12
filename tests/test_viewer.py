@@ -12,8 +12,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6.QtWidgets")
 from meshport import Material, Mesh, Node, Scene
 
-from convertall import viewer
-from convertall.formats import viewable
+from latheport import viewer
+from latheport.formats import viewable
 
 from .samples import Samples
 
@@ -190,7 +190,7 @@ RENDER = r"""
 import sys
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
-from convertall import viewer
+from latheport import viewer
 app = QApplication([])
 model = viewer.flatten(viewer.load_scene(sys.argv[1], "glb"), "glb")
 view = viewer.ModelView({"bg": "#102030", "text": "#ffffff", "accent": "#ff00ff"})
@@ -251,6 +251,19 @@ def _distinct(p):
     return np.unique(np.round(np.asarray(p, float), 5), axis=0)
 
 
+def test_a_part_animated_to_scale_0_poses_without_error():
+    """Scaling an object to 0 is how Blender hides one: its matrix has no inverse, and playing
+    the take used to stop with "Singular matrix"."""
+    from meshport import Animation, Channel
+    node = Node("hidden", mesh=cube())
+    scale = Channel(node, "scale", np.array([0.0, 1.0]), np.array([[1, 1, 1.0], [0, 0, 0.0]]))
+    model = viewer.flatten(Scene([node], [Animation("Hide", [scale])]))
+    posed = model.vertices.copy()
+    model.motion.pose(1.0, posed)
+    assert np.isfinite(posed["pos"]).all() and np.isfinite(posed["normal"]).all()
+    assert np.allclose(posed["pos"], 0)
+
+
 def test_animated_models_pose_as_meshport_does():
     scene = _moving_scene()
     model = viewer.flatten(scene)
@@ -294,7 +307,7 @@ def test_takes_that_move_different_things_play_together():
 
 
 def _app():
-    from convertall.qtdraw import app as qt_app
+    from latheport.qtdraw import app as qt_app
     return qt_app()  # kept for the whole session: a Qt application made twice has no fonts
 
 
@@ -408,7 +421,7 @@ import sys
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
-from convertall import viewer
+from latheport import viewer
 import meshport
 app = QApplication([])
 model = viewer.flatten(meshport.load(sys.argv[1]), "glb")
@@ -443,3 +456,28 @@ def test_draws_the_model_where_its_animation_puts_it(tmp_path):
     assert out.returncode == 0, out.stderr
     _, right0, left1, _ = map(int, out.stdout.split())
     assert right0 < 160 < left1  # left of the middle at the start, right of it at the end
+
+
+def test_a_minimised_window_plays_no_frames():
+    """A minimised window's widgets still say they're visible: the drop zone's preview went on posing the model."""
+    app = _app()
+    panel = viewer.ViewerPanel({"bg": "#202020"})
+    panel.show_model(viewer.flatten(_moving_scene()))
+    player = panel.player
+    try:
+        panel.show()
+        posed = []
+        player.motion.pose = lambda t, v: posed.append(t)
+        panel.setWindowState(viewer.Qt.WindowMinimized)
+        app.processEvents()
+        assert panel.view.isVisible() and panel.isMinimized()
+        player._tick()
+        assert posed == []
+        panel.setWindowState(viewer.Qt.WindowNoState)
+        app.processEvents()
+        player._tick()
+        assert len(posed) == 1
+    finally:
+        panel.clear()
+        panel.deleteLater()
+        app.processEvents()

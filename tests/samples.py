@@ -16,11 +16,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from convertall import engines
-from convertall.converters import archives, documents, images, media
-from convertall.errors import ConversionError
+from latheport import engines
+from latheport.converters import archives, documents, images, media
+from latheport.errors import ConversionError
 
-TEXT = "ConvertAll sample text"
+TEXT = "Latheport sample text"
 
 
 def picture(size=(160, 120), shade=0) -> Image.Image:
@@ -122,13 +122,13 @@ FODP = """<?xml version="1.0" encoding="UTF-8"?>
  office:version="1.2" office:mimetype="application/vnd.oasis.opendocument.presentation">
 <office:body><office:presentation>
 <draw:page draw:name="One"><draw:frame svg:x="2cm" svg:y="2cm" svg:width="20cm" svg:height="3cm">
-<draw:text-box><text:p>Slide one: ConvertAll sample text</text:p></draw:text-box></draw:frame></draw:page>
+<draw:text-box><text:p>Slide one: Latheport sample text</text:p></draw:text-box></draw:frame></draw:page>
 <draw:page draw:name="Two"><draw:frame svg:x="2cm" svg:y="2cm" svg:width="20cm" svg:height="3cm">
 <draw:text-box><text:p>Slide two</text:p></draw:text-box></draw:frame></draw:page>
 </office:presentation></office:body></office:document>
 """
 SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80"><rect width="120" height="80" fill="#eee"/>'
-       '<circle cx="60" cy="40" r="30" fill="#c33"/><text x="10" y="75" font-size="10">ConvertAll</text></svg>')
+       '<circle cx="60" cy="40" r="30" fill="#c33"/><text x="10" y="75" font-size="10">Latheport</text></svg>')
 XPM = """/* XPM */
 static char *sample[] = {
 "4 4 2 1",
@@ -462,9 +462,9 @@ def write_dng(path: Path) -> None:
     for t, typ, values in (
             (254, 4, [0]), (256, 4, [w]), (257, 4, [h]), (258, 3, [16, 16, 16]), (259, 3, [1]),
             (262, 3, [34892]),  # LinearRaw
-            (271, 2, "ConvertAll"), (272, 2, "Sample"), (273, 4, [0]), (274, 3, [1]), (277, 3, [3]),
+            (271, 2, "Latheport"), (272, 2, "Sample"), (273, 4, [0]), (274, 3, [1]), (277, 3, [3]),
             (278, 4, [h]), (279, 4, [len(pixels)]), (284, 3, [1]),
-            (50706, 1, [1, 4, 0, 0]), (50707, 1, [1, 1, 0, 0]), (50708, 2, "ConvertAll Sample"),  # DNG version, model
+            (50706, 1, [1, 4, 0, 0]), (50707, 1, [1, 1, 0, 0]), (50708, 2, "Latheport Sample"),  # DNG version, model
             (50717, 4, [65535] * 3), (50721, 10, ident), (50728, 5, [(1, 1)] * 3),  # white level, colour, neutral
             (50778, 3, [21])):  # calibrated under D65
         tag(t, typ, values)
@@ -664,7 +664,7 @@ class Samples:
 
     def _make(self, fmt: str, p: Path) -> Path | None:
         img = picture()
-        # images (cursor and pixmap made by hand, so ConvertAll's own writers don't test themselves)
+        # images (cursor and pixmap made by hand, so Latheport's own writers don't test themselves)
         if fmt == "cur":
             buf = io.BytesIO()
             img.resize((32, 32)).save(buf, "ICO", sizes=[(32, 32)], bitmap_format="bmp")
@@ -678,7 +678,7 @@ class Samples:
         if fmt in ("ps", "eps"):  # vector PostScript with real text (Pillow's EPS would be a bitmap)
             p.write_text(EPS if fmt == "eps" else PS, encoding="ascii")
             return p
-        if fmt in ("jxl", "exr", "hdr"):  # pixport reads these for ConvertAll, and writes them too
+        if fmt in ("jxl", "exr", "hdr"):  # pixport reads these for Latheport, and writes them too
             return _pixport(self("png"), p, fmt)
         writer = {"dng": write_dng, "xps": write_xps, "oxps": lambda q: write_xps(q, open_xps=True),
                   "wpd": write_wpd, "vsdx": write_vsdx, "chm": write_chm}.get(fmt)
@@ -817,7 +817,7 @@ class Samples:
         if fmt == "fb2":
             p.write_text(FB2, encoding="utf-8")
             return p
-        from convertall.converters import ebooks
+        from latheport.converters import ebooks
         if fmt in ebooks.BOOKS_OUT:  # the rarer ebook formats, written by bookport from the sample EPUB
             import bookport
             bookport.read(self("epub")).write(p, fmt)
@@ -843,7 +843,7 @@ class Samples:
             return p
         # data
         if fmt in ("json", "jsonl", "yaml", "toml", "xml", "plist"):
-            from convertall.converters import data
+            from latheport.converters import data
             data.dump({"people": RECORDS} if fmt != "jsonl" else RECORDS, p, fmt)
             return p
         if fmt == "ini":
@@ -965,7 +965,7 @@ class Samples:
         return self._archive(fmt, p)
 
     def _archive(self, fmt: str, p: Path) -> Path | None:
-        """Archives and disk images ConvertAll reads but doesn't write, from data/archives:
+        """Archives and disk images Latheport reads but doesn't write, from data/archives:
         packport's own test files, libarchive's (COPYING-libarchive.txt) and dfvfs's disk images
         (LICENSE-dfvfs.txt), the disk images kept .Z-compressed. xar, pkg and MSI are made here
         with Windows' own tar.exe and Windows Installer."""

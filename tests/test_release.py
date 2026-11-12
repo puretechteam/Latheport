@@ -51,17 +51,17 @@ BUILT_IN = ["ezdxf", "ezdxf.addons.drawing", "ezdxf.addons.drawing.svg", "ezdxf.
             "py7zr", "openpyxl", "mammoth", "markdown", "markdownify", "bs4", "pysubs2", "fontTools.ttLib", "PIL.Image",
             "pillow_heif", "pypdfium2", "meshport", "bookport", "packport", "vtracer", "pycdlib", "olefile", "puremagic",
             "yaml", "tomli_w", "lxml.etree", "networkx", "lz4.frame", "brotli", "numpy", "PySide6.QtSvg",
-            "convertall.converters", "convertall.pdfium", "convertall.qtdraw"]
+            "latheport.converters", "latheport.pdfium", "latheport.qtdraw"]
 
 
 def test_nothing_the_converters_use_is_left_out_of_the_build():
-    """Every library a conversion imports still imports with the modules ConvertAll.spec leaves out
+    """Every library a conversion imports still imports with the modules Latheport.spec leaves out
     blocked, as in the built app. (pyparsing, under ezdxf, imports unittest: with it left out,
     every DXF conversion in the Windows app failed with "No module named 'unittest'".)"""
     import ast
     import subprocess
     import sys
-    tree = ast.parse((ROOT / "ConvertAll.spec").read_text(encoding="utf-8"))
+    tree = ast.parse((ROOT / "Latheport.spec").read_text(encoding="utf-8"))
     excluded = []
     for node in ast.walk(tree):
         target = getattr(node, "target", None) or (node.targets[0] if isinstance(node, ast.Assign) else None)
@@ -90,7 +90,7 @@ print(failed)
 
 def test_a_program_that_needs_the_visual_cpp_runtime_isnt_shipped(tmp_path):
     """A fresh Windows has no Visual C++ runtime (vcruntime140.dll and the rest) unless something
-    installed it. The app carries one in _internal, which only what runs inside ConvertAll.exe
+    installed it. The app carries one in _internal, which only what runs inside Latheport.exe
     finds: an exe at the top of the folder that imports it fails to start there. Python's own
     python.exe imports it; Windows' where.exe doesn't."""
     import shutil

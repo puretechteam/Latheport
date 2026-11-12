@@ -6,9 +6,9 @@ import pytest
 import trimesh
 from PIL import Image
 
-from convertall.detect import detect
-from convertall.errors import ConversionError
-from convertall.pipeline import convert
+from latheport.detect import detect
+from latheport.errors import ConversionError
+from latheport.pipeline import convert
 
 
 def _scene_stats(path):
@@ -221,7 +221,7 @@ def test_blend_files_convert(tmp_path):
 
 
 def test_no_3d_format_needs_an_engine():
-    from convertall import registry
+    from latheport import registry
     for src in ("blend", "usd", "usdz", "abc", "fbx", "3ds"):
         for dst, route in registry.targets(src).items():
             if registry.category(dst) in ("3D model", "CAD"):
@@ -271,7 +271,7 @@ def test_gmsh_is_downloaded_the_first_time_a_cad_part_needs_it(tmp_path, monkeyp
     downloads the pinned wheel, checks its SHA-256 and keeps only gmsh.py, the DLL and the license."""
     import sys
 
-    from convertall import engines, registry
+    from latheport import engines, registry
     url, sha = _fake_gmsh_wheel(tmp_path)
     monkeypatch.setattr(engines, "ENGINE_HOME", str(tmp_path / "engines"))
     monkeypatch.setattr(engines, "GMSH_WHEEL", (url, sha))
@@ -295,7 +295,7 @@ def test_gmsh_is_downloaded_the_first_time_a_cad_part_needs_it(tmp_path, monkeyp
 def test_a_gmsh_download_that_doesnt_match_its_checksum_is_refused(tmp_path, monkeypatch):
     import sys
 
-    from convertall import engines
+    from latheport import engines
     url, _ = _fake_gmsh_wheel(tmp_path)
     monkeypatch.setattr(engines, "ENGINE_HOME", str(tmp_path / "engines"))
     monkeypatch.setattr(engines, "GMSH_WHEEL", (url, "0" * 64))

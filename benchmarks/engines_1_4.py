@@ -4,7 +4,7 @@ used Pandoc, ImageMagick and DjVuLibre take, with what they write.
     python benchmarks/engines_1_4.py census
     python benchmarks/engines_1_4.py time <corpus dir> <out dir> [--kinds markup,raw,image,djvu] [--limit N]
 
-`census` counts every route ConvertAll knows (best route, engines installed) and how many still
+`census` counts every route Latheport knows (best route, engines installed) and how many still
 work with no engine at all. `time` converts each corpus file in-process through
 pipeline.convert, best of `--repeat` runs, keeps every result in <out dir> (so a later run can
 be compared against it pixel by pixel or word by word) and writes <out dir>/timings.json.
@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from convertall import engines, pipeline, registry
+from latheport import engines, pipeline, registry
 
 MARKUP = {".tex": "tex", ".latex": "tex", ".rst": "rst", ".org": "org", ".adoc": "adoc", ".asc": "adoc",
           ".asciidoc": "adoc", ".wiki": "wiki", ".mediawiki": "wiki", ".typ": "typ", ".docbook": "docbook",

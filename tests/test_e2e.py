@@ -12,11 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from convertall import engines, pipeline, registry
-from convertall.assurance import Report
-from convertall.detect import COMICS
-from convertall.errors import ConversionError
-from convertall.formats import FORMATS, category, suggest
+from latheport import engines, pipeline, registry
+from latheport.assurance import Report
+from latheport.detect import COMICS
+from latheport.errors import ConversionError
+from latheport.formats import FORMATS, category, suggest
 
 from .samples import SUB_CODEC, Samples
 
@@ -60,7 +60,7 @@ def check(path: Path, fmt: str) -> None:
     assert path.stat().st_size > 0, f"{path.name} is empty"
     cat = category(fmt)
     data = path.read_bytes()
-    from convertall.converters import images
+    from latheport.converters import images
     if fmt in images.READ and fmt not in ("ico", "icns", "cur"):
         from PIL import Image
         with Image.open(path) as img:
@@ -81,11 +81,11 @@ def check(path: Path, fmt: str) -> None:
         import ezdxf
         assert len(ezdxf.readfile(path).modelspace()) > 0
     elif cat == "Map":
-        from convertall.converters import maps
+        from latheport.converters import maps
         m = maps.read_map(path, fmt)
         assert m.points or m.lines
     elif fmt in ("vcf", "ics"):
-        from convertall.converters import contacts
+        from latheport.converters import contacts
         text = data.decode("utf-8")
         assert (contacts.read_vcards if fmt == "vcf" else contacts.read_events)(text)
     elif fmt == "pdf":
@@ -120,7 +120,7 @@ def check(path: Path, fmt: str) -> None:
         pages = [p for p in (out.rglob("*") if out.is_dir() else [out]) if p.suffix.lower() in (".jpg", ".png", ".webp")]
         assert pages, f"{path.name} has no pages"
     elif cat == "Data" or fmt in ("csv", "tsv"):
-        from convertall.converters import data as data_mod
+        from latheport.converters import data as data_mod
         assert data_mod.load(path, fmt) is not None
     elif fmt in ("txt", "md", "html") or cat == "Markup":
         assert data.decode("utf-8").strip()
@@ -189,5 +189,5 @@ def test_convert(pair, samples, tmp_path):
             return
         raise
     check(out, dst_fmt)
-    # the checks ConvertAll makes on every result: on these samples nothing may differ unexplained
+    # the checks Latheport makes on every result: on these samples nothing may differ unexplained
     assert not report.warnings, report.lines()

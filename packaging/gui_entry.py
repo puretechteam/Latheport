@@ -1,7 +1,7 @@
 import sys
 
 if len(sys.argv) > 1 and sys.argv[1] == "--cli":
-    # started by convertall-cli.exe (packaging/launcher): take its console, so Ctrl+C reaches
+    # started by latheport-cli.exe (packaging/launcher): take its console, so Ctrl+C reaches
     # this program too; output goes to the handles it passed on (its console, a pipe or a file)
     import ctypes
 
@@ -24,7 +24,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "--cli":
     for name in ("stdout", "stderr"):
         if getattr(sys, name) is None:  # nothing passed on: write to the console itself
             setattr(sys, name, open("CONOUT$", "w", encoding="utf-8", errors="replace"))  # noqa: SIM115
-    from convertall.cli import main as cli_main
+    from latheport.cli import main as cli_main
 
     # an exception that leaves this file becomes a crash window, which would hold up a script
     # until someone closes it: a terminal tool reports it on stderr and exits instead
@@ -37,6 +37,6 @@ if len(sys.argv) > 1 and sys.argv[1] == "--cli":
         code = 1
     sys.exit(code)
 
-from convertall.instance import main
+from latheport.instance import main
 
 sys.exit(main())

@@ -5,13 +5,13 @@ import os
 
 import pytest
 
-from convertall import options
+from latheport import options
 
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     path = tmp_path / "presets.json"
-    monkeypatch.setenv("CONVERTALL_PRESETS", str(path))
+    monkeypatch.setenv("LATHEPORT_PRESETS", str(path))
     return path
 
 

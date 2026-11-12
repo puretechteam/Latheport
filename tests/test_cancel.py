@@ -12,9 +12,9 @@ import pytest
 import trimesh
 from PIL import Image
 
-from convertall import cancel, engines, pipeline, registry
-from convertall.converters import documents
-from convertall.errors import ConversionError
+from latheport import cancel, engines, pipeline, registry
+from latheport.converters import documents
+from latheport.errors import ConversionError
 
 
 def _alive(pid: int) -> bool:
@@ -110,7 +110,7 @@ def test_cancel_leaves_other_programs_alone(tmp_path):
 
 def test_engine_timeout_still_kills_and_raises(tmp_path):
     cmd, pids = _slow_engine(tmp_path)
-    with pytest.raises(subprocess.TimeoutExpired):
+    with pytest.raises(ConversionError, match="took longer than 1 second"):  # in words, not the command line
         engines.run(cmd, timeout=1)
     time.sleep(0.3)
     assert pids() and not _alive(pids()[0])
@@ -130,7 +130,7 @@ def _fake_route(monkeypatch, func):
 def _temp_dirs() -> set[str]:
     import tempfile
     from pathlib import Path
-    return {p.name for p in Path(tempfile.gettempdir()).glob("convertall-*")}
+    return {p.name for p in Path(tempfile.gettempdir()).glob("latheport-*")}
 
 
 def test_cancelled_conversion_writes_nothing_and_cleans_up(tmp_path, monkeypatch):
@@ -190,7 +190,7 @@ def test_cancelled_extraction_leaves_no_hidden_folder(tmp_path):
     out = tmp_path / "out"
     with cancel.using(_StopAfter(4)), pytest.raises(cancel.Cancelled):
         pipeline.extract(arc, out_dir=out)
-    assert not list(out.iterdir())  # no ".convertall-*" left in the user's folder
+    assert not list(out.iterdir())  # no ".latheport-*" left in the user's folder
 
 
 def test_libreoffice_wait_stops_on_cancel_and_has_a_limit(tmp_path):
@@ -238,7 +238,7 @@ def test_stopping_an_extraction_says_stopped_not_damaged(tmp_path, monkeypatch, 
     not 130), and a stopped ZIP was unpacked again from the start by packport."""
     import tarfile
 
-    from convertall.converters import archives
+    from latheport.converters import archives
     arc = tmp_path / f"big.{kind}"
     parts = [(f"part{i}.bin", os.urandom(3 << 20)) for i in range(6)]  # 3 MB each: several chunks
     if kind == "zip":
@@ -261,7 +261,7 @@ def test_stopping_an_extraction_says_stopped_not_damaged(tmp_path, monkeypatch, 
 CLOSE_DRIVER = r"""
 import os, sys, time
 from PySide6.QtCore import QSettings, QTimer
-from convertall import engines, gui, instance, updates, viewer
+from latheport import engines, gui, instance, selfupdate, updates, viewer
 what, flag, ini, wait = sys.argv[1:5]
 gui.QSettings = lambda *a: QSettings(ini, QSettings.IniFormat)
 
@@ -270,7 +270,7 @@ def slow(*a, **k):
     time.sleep(float(wait))
     return False
 
-gui._thumbnail = viewer.load_scene = engines.install = updates.latest = slow
+gui._thumbnail = viewer.load_scene = engines.install = updates.release = selfupdate.download = slow
 real_show, real_viewers = gui.Window.show, gui.Window.open_viewers
 
 def close_when_started():
@@ -287,7 +287,14 @@ def viewers(self, paths):
 def show(self):
     real_show(self)
     if what == "update":
+        self.settings.setValue("test/kept", "yes")  # unsaved until the way out syncs it
         self.check_updates()
+    elif what == "download":  # Update now, mid-download
+        from pathlib import Path
+        selfupdate.app_dir = lambda: Path(flag).parent
+        self.update_release = updates.Release("9.0.0", "https://github.com/puretechteam/Latheport", "x", 1, "0" * 64)
+        self.update_version = "9.0.0"
+        self.start_update()
     elif what.startswith("install"):
         dialog = gui.EnginesDialog(self)
         dialog._install("gmsh", gui.QPushButton())
@@ -301,7 +308,8 @@ sys.exit(instance.main())
 """
 
 
-@pytest.mark.parametrize("what, wait", [("thumbnail", 60), ("3D preview", 60), ("update", 60), ("install", 60),
+@pytest.mark.parametrize("what, wait", [("thumbnail", 60), ("3D preview", 60), ("update", 60), ("download", 60),
+                                        ("install", 60),
                                         ("install, dialog closed", 60), ("install, dialog closed", 0.5)])
 def test_closing_the_window_while_a_thread_is_busy_exits_cleanly(tmp_path, what, wait):
     """Qt ends a program with a crash code when a thread is still running as it goes away."""
@@ -320,4 +328,4 @@ def test_closing_the_window_while_a_thread_is_busy_exits_cleanly(tmp_path, what,
     assert r.returncode == 0, f"exit {r.returncode:#x} {r.stderr[-400:]}"
     assert "Traceback" not in r.stderr, r.stderr[-400:]
     if what == "update":
-        assert "checked" in ini.read_text(encoding="utf-8")  # settings aren't lost by the quick way out
+        assert "kept=yes" in ini.read_text(encoding="utf-8")  # settings aren't lost by the quick way out

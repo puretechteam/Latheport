@@ -3,9 +3,9 @@ here (never anyone's own):
 
     .venv\\Scripts\\python packaging\\screenshots.py [BIG_ARCHIVE | --promo]
 
-- screenshots/convertall.png: the window, dark, with a video to cut and fit in 10 MB, beside the
-  release: the engines it no longer needs (GONE), measured times against the last one (TIMES) and
-  what's new (NEW). It heads the README and is the picture for the release's post.
+- screenshots/latheport.png: the photo editor, dark, with two made-up photos (a caption added, made
+  warmer), beside the release: what it no longer needs (GONE), measured times against the last one
+  (TIMES) and what's new (NEW). It heads the README and is the picture for the release's post.
 - screenshots/after_converting_{light,dark}.png: a two-part GLB made into an STL, with Details open
 - screenshots/extracting_{light,dark}.png: a big archive unpacking, megabytes done and Cancel
 
@@ -41,12 +41,15 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication
 
-from convertall import __version__, gui, registry
+from latheport import __version__, gui, registry
 
-NEW = ["Cut, fit in a size, even out loudness, join", "Watch folders, and a queue for what you drop"]
-GONE = "No ImageMagick, Pandoc or DjVuLibre: 330 MB less to install"
-# seconds against 1.3.0 with those engines, same files, same PC, the two taking turns on each file, best of 3: what, before, now
-TIMES = [("20 DjVu books to PDF", 388.8, 28.9), ("Markup files to HTML", 8.18, 1.43), ("12 RAW photos to PNG", 91.7, 59.0)]
+NEW = ["A photo editor: adjust, crop, draw, add text, hide", "Video timeline, PDF tools, smart tools on your PC"]
+GONE = "Was ConvertAll. Needs no Ghostscript: 24 MB less"
+BEFORE = "1.4.0"
+# seconds, the built 1.4.0 (with Ghostscript) against the built 1.5.0, same files, same PC, the two taking turns,
+# best of 3, each batch one command: what, before, now
+TIMES = [("25 PostScript files to PDF", 4.94, 2.77), ("20 DjVu books to PDF", 76.3, 61.7),
+         ("12 RAW photos to PNG", 65.5, 60.0)]
 
 
 def pump(app, until, seconds: float) -> bool:
@@ -77,7 +80,7 @@ def big_archive(work: Path) -> Path:
 
 def settle(app) -> None:
     """Let a 3D preview that's loading on its thread finish (a window closed under it crashes)."""
-    viewer = sys.modules.get("convertall.viewer")
+    viewer = sys.modules.get("latheport.viewer")
     for job in list(viewer._RUNNING) if viewer else []:
         job.wait()
     app.processEvents()
@@ -153,31 +156,79 @@ def after_converting(app, theme: str, model: Path, work: Path) -> QImage:
             p.unlink()
 
 
-def long_video(work: Path) -> Path:
-    """Six minutes of FFmpeg's test picture and tone at 720p, big enough (about 130 MB) that fitting it in 10 MB makes sense."""
-    from convertall import engines
-    path = work / "talk.mp4"
-    engines.run([engines.find("ffmpeg"), "-hide_banner", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24:duration=360",
-                 "-f", "lavfi", "-i", "sine=frequency=330:duration=360", "-vf", "noise=alls=12:allf=t", "-c:v", "libx264",
-                 "-preset", "ultrafast", "-b:v", "2800k", "-threads", "4", "-c:a", "aac", "-shortest", str(path)])
+def landscape(path: Path, seed: int, sky: tuple, ground: tuple) -> Path:
+    """A made-up photo (never anyone's own): a sky at golden hour, the sun, three ridges and a still lake."""
+    w, h = 1600, 1067
+    rng = random.Random(seed)
+    img = QImage(w, h, QImage.Format_RGB32)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+    grad = QLinearGradient(0, 0, 0, h * 0.62)
+    for at, colour in zip((0, 0.55, 1), sky, strict=True):
+        grad.setColorAt(at, QColor(colour))
+    p.fillRect(img.rect(), grad)
+    sun = QRadialGradient(QPointF(w * 0.68, h * 0.44), 260)
+    sun.setColorAt(0, QColor(255, 236, 170, 255))
+    sun.setColorAt(0.18, QColor(255, 214, 140, 230))
+    sun.setColorAt(1, QColor(255, 180, 120, 0))
+    p.fillRect(img.rect(), sun)
+    horizon = h * 0.62
+    for k, colour in enumerate(ground):  # far to near, each ridge lower and darker
+        ridge = QPainterPath(QPointF(0, h))
+        base = horizon - 150 + 55 * k
+        x = 0.0
+        while x <= w:
+            ridge.lineTo(x, base - rng.uniform(20, 120 - 25 * k))
+            x += rng.uniform(60, 140)
+        ridge.lineTo(w, h)
+        ridge.closeSubpath()
+        p.fillPath(ridge, QColor(colour))
+    water = QLinearGradient(0, horizon, 0, h)
+    water.setColorAt(0, QColor(sky[2]).darker(115))
+    water.setColorAt(1, QColor(sky[0]).darker(160))
+    p.fillRect(QRectF(0, horizon, w, h - horizon), water)
+    p.setPen(QPen(QColor(255, 225, 170, 150), 3))
+    for k in range(14):  # the sun's path on the water
+        y = horizon + 18 + k * 22
+        half = 140 - 8 * k + rng.uniform(-20, 20)
+        p.drawLine(QPointF(w * 0.68 - half, y), QPointF(w * 0.68 + half, y))
+    p.end()
+    img.save(str(path), "JPG", 92)
     return path
 
 
-def cutting(app, theme: str, video: Path, work: Path) -> QImage:
-    """The window with a video to cut and fit in 10 MB, its Options open."""
+def editing(app, theme: str, work: Path) -> QImage:
+    """The photo editor with two made-up photos: a caption typed with the Text tool, then made warmer in Adjust."""
+    from PySide6.QtTest import QTest
+    first = landscape(work / "lake at sunset.jpg", 7, ("#2b3a67", "#c96f53", "#f6c177"),
+                      ("#4a3b52", "#33283d", "#1e1826"))
+    second = landscape(work / "morning ridge.jpg", 11, ("#4d7fb8", "#9fc3e0", "#f3dcb2"),
+                       ("#56708a", "#3c5166", "#253445"))
     w = window(app, theme, work)
     try:
-        w.set_files([video])
+        w.set_files([first, second])
         pump(app, lambda: False, 0.5)
-        w.picker.set_current("mp4")
-        pump(app, lambda: False, 0.2)
-        panel = w.options_panel
-        panel.head.click()
-        pump(app, lambda: False, 0.3)
-        for key, value in (("start", "1:30"), ("end", "5:00"), ("target_size", 10)):
-            panel.widgets[key].setValue(value)
-        pump(app, lambda: False, 0.5)
-        return w.grab().toImage()
+        w.picker.set_current("jpg")
+        w.open_editor()
+        e = w.editor
+        e.resize(1280, 800)
+        e.show()
+        pump(app, lambda: False, 1.5)
+        e.rail_buttons["text"].click()
+        stage = e.stage
+        box = stage.box_rect()
+        QTest.mouseClick(stage, Qt.LeftButton, Qt.NoModifier,
+                         QPoint(round(box.left() + box.width() * 0.08), round(box.top() + box.height() * 0.14)))
+        QTest.keyClicks(stage, "Golden hour")
+        QTest.keyClick(stage, Qt.Key_Return)
+        pump(app, lambda: False, 0.4)
+        e.rail_buttons["adjust"].click()
+        for name, value in (("warmth", 30), ("saturation", 20), ("contrast", 10)):
+            e.adjust_sliders[name][0].setValue(value)
+        pump(app, lambda: False, 1.5)
+        shot = e.grab().toImage()
+        e.close()
+        return shot
     finally:
         settle(app)
         w.close()
@@ -193,8 +244,8 @@ def promo(shot: QImage) -> QImage:
     p.setRenderHint(QPainter.Antialiasing)
     p.setRenderHint(QPainter.SmoothPixmapTransform)
     bg = QLinearGradient(0, 0, 1600, 900)
-    bg.setColorAt(0, QColor("#14151d"))
-    bg.setColorAt(1, QColor("#20223a"))
+    bg.setColorAt(0, QColor("#16130f"))
+    bg.setColorAt(1, QColor("#2a1d17"))  # warm, to go with the copper
     p.fillRect(img.rect(), bg)
     # a soft glow of the accent colour behind the window
     glow = QRadialGradient(QPointF(400, 450), 520)
@@ -203,7 +254,7 @@ def promo(shot: QImage) -> QImage:
     glow.setColorAt(1, QColor(accent.red(), accent.green(), accent.blue(), 0))
     p.fillRect(img.rect(), glow)
     # the window, scaled to fit, on a card
-    scaled = shot.scaled(640, 760, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    scaled = shot.scaled(720, 760, Qt.KeepAspectRatio, Qt.SmoothTransformation)
     x, y = (780 - scaled.width()) // 2, (900 - scaled.height()) // 2
     card = QPainterPath()
     card.addRoundedRect(QRectF(x - 1, y - 1, scaled.width() + 2, scaled.height() + 2), 18, 18)
@@ -224,21 +275,26 @@ def promo(shot: QImage) -> QImage:
         p.drawText(QRect(at.x(), at.y(), width, size * 2), align | Qt.AlignTop, s)
 
     left = 800
-    icon = QImage(str(ROOT / "convertall" / "assets" / "icon.png")).scaled(64, 64, Qt.KeepAspectRatio,
+    icon = QImage(str(ROOT / "latheport" / "assets" / "icon.png")).scaled(64, 64, Qt.KeepAspectRatio,
                                                                           Qt.SmoothTransformation)
     p.drawImage(left, 92, icon)
-    text("ConvertAll", 56, dark["text"], QPoint(left + 84, 84), QFont.DemiBold)
+    text("Latheport", 56, dark["text"], QPoint(left + 84, 84), QFont.DemiBold)
     # the version as a pill beside the name
     f = QFont("Segoe UI", 1)
     f.setPixelSize(56)
     f.setWeight(QFont.DemiBold)
-    name_w = QFontMetrics(f).horizontalAdvance("ConvertAll")
+    name_w = QFontMetrics(f).horizontalAdvance("Latheport")
     pill = QRectF(left + 84 + name_w + 22, 104, 110, 42)
     path = QPainterPath()
     path.addRoundedRect(pill, 21, 21)
     p.fillPath(path, QColor(accent.red(), accent.green(), accent.blue(), 60))
-    text(__version__, 24, dark["accent"], QPoint(int(pill.x()), int(pill.y()) + 5), QFont.Bold, int(pill.width()),
-         Qt.AlignHCenter)
+    f.setPixelSize(24)
+    f.setWeight(QFont.Bold)
+    p.setFont(f)
+    p.setPen(QColor(dark["accent"]))
+    ink = QFontMetrics(f).tightBoundingRect(__version__)  # the digits themselves: no descenders to centre on
+    p.drawText(QPointF(pill.center().x() - ink.width() / 2 - ink.x(), pill.center().y() - ink.height() / 2 - ink.y()),
+               __version__)
     text("Drop a file. Pick a format. Done.", 34, dark["text"], QPoint(left, 190), QFont.DemiBold)
     ins = {s for s in registry._edges if s != "*"}
     outs = {e.dst for es in registry._edges.values() for e in es}
@@ -246,7 +302,7 @@ def promo(shot: QImage) -> QImage:
          QPoint(left, 244))
     # the engines gone, then the times, before and now
     text(GONE, 24, dark["accent"], QPoint(left, 300), QFont.DemiBold)
-    text("SECONDS, 1.3.0 AND ITS ENGINES AGAINST " + __version__, 17, dark["muted"], QPoint(left, 356), QFont.DemiBold)
+    text(f"SECONDS, CONVERTALL {BEFORE} AGAINST LATHEPORT {__version__}", 17, dark["muted"], QPoint(left, 356), QFont.DemiBold)
 
     def seconds(v: float) -> str:
         return f"{v:.1f} s" if v >= 1 else f"{v:.2f} s"
@@ -270,7 +326,7 @@ def promo(shot: QImage) -> QImage:
         p.setPen(Qt.NoPen)
         p.drawEllipse(QPoint(left + 6, 711 + 42 * k), 5, 5)
         text(line, 24, dark["text"], QPoint(left + 28, 695 + 42 * k))
-    text("github.com/puretechteam/ConvertAll", 24, dark["accent"], QPoint(left, 790))
+    text("github.com/puretechteam/Latheport", 24, dark["accent"], QPoint(left, 790))
     p.end()
     return img
 
@@ -293,8 +349,8 @@ def one(kind: str, theme: str, src: Path, work: Path) -> None:
 def _one(app, kind: str, theme: str, src: Path, work: Path) -> None:
     if kind == "extracting":
         extracting(app, theme, src, work).save(str(OUT / f"extracting_{theme}.png"))
-    elif kind == "cutting":
-        promo(cutting(app, theme, src, work)).save(str(OUT / "convertall.png"))
+    elif kind == "editing":
+        promo(editing(app, theme, work)).save(str(OUT / "latheport.png"))
     else:
         after_converting(app, theme, src, work).save(str(OUT / f"after_converting_{theme}.png"))
 
@@ -307,10 +363,10 @@ def main() -> int:
         one(sys.argv[2], sys.argv[3], Path(sys.argv[4]), Path(sys.argv[5]))
         return 0
     if len(sys.argv) > 1 and sys.argv[1] == "--promo":  # only the release's picture
-        with tempfile.TemporaryDirectory(prefix="convertall-shots-") as tmp:
-            subprocess.run([sys.executable, __file__, "--one", "cutting", "dark", str(long_video(Path(tmp))), tmp], check=True)
+        with tempfile.TemporaryDirectory(prefix="latheport-shots-") as tmp:
+            subprocess.run([sys.executable, __file__, "--one", "editing", "dark", tmp, tmp], check=True)
         return 0
-    with tempfile.TemporaryDirectory(prefix="convertall-shots-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="latheport-shots-") as tmp:
         work = Path(tmp)
         archive = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else None
         if archive is None:
@@ -326,7 +382,7 @@ def main() -> int:
         for theme in ("light", "dark"):
             for kind, src in (("extracting", archive), ("after_converting", bracket)):
                 subprocess.run([sys.executable, __file__, "--one", kind, theme, str(src), str(work)], check=True)
-        subprocess.run([sys.executable, __file__, "--one", "cutting", "dark", str(long_video(work)), str(work)], check=True)
+        subprocess.run([sys.executable, __file__, "--one", "editing", "dark", str(work), str(work)], check=True)
     for p in sorted(OUT.glob("*.png")):
         img = QImage(str(p))
         print(f"{p.name}: {img.width()} x {img.height()}, {p.stat().st_size // 1024} KB")

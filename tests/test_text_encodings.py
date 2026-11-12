@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from convertall import convert
-from convertall.converters import maps, models, notebooks, subtitles
+from latheport import convert
+from latheport.converters import maps, models, notebooks, subtitles
 
 ENCODINGS = [("utf-16", "utf-16"), ("utf-16-be", "utf-16-be-bom"), ("utf-8-sig", "utf-8-bom"),
              ("utf-8", "utf-8"), ("cp1252", "cp1252")]

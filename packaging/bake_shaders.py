@@ -1,4 +1,4 @@
-"""Bake the 3D viewer's shaders: convertall/assets/shaders/*.vert|frag -> *.qsb.
+"""Bake the 3D viewer's shaders: latheport/assets/shaders/*.vert|frag -> *.qsb.
 
 Run after editing a shader:  python packaging/bake_shaders.py
 The .qsb files are committed, so building the app doesn't need this step. Each one holds the
@@ -12,7 +12,7 @@ from pathlib import Path
 import PySide6
 
 QSB = Path(PySide6.__file__).parent / ("qsb.exe" if sys.platform == "win32" else "qsb")
-SHADERS = Path(__file__).resolve().parent.parent / "convertall" / "assets" / "shaders"
+SHADERS = Path(__file__).resolve().parent.parent / "latheport" / "assets" / "shaders"
 
 
 def main() -> int:

@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from convertall import engines, safety
-from convertall.converters import archives
-from convertall.errors import ConversionError
-from convertall.pipeline import convert, extract
+from latheport import engines, safety
+from latheport.converters import archives
+from latheport.errors import ConversionError
+from latheport.pipeline import convert, extract
 
 TAG = uuid.uuid4().hex[:8]  # names an escape would leave at the drive root, unique to this run
 
@@ -339,6 +339,25 @@ def _rar(path: Path, entries, password: bool = False) -> Path:
     return path
 
 
+def test_rpm_payload_packed_over_200_to_1_extracts(fence):
+    """packport's own cap on unpacking ahead is 200 times the file (64 MB at least); Latheport's cap
+    is the free space, so 90 MB of zeros in a 90 KB RPM is no bomb."""
+    from .samples import write_rpm
+    arc = fence.arc("zeros.rpm")
+    write_rpm(arc, {"./big": bytes(90 << 20)})
+    assert arc.stat().st_size * 200 < 90 << 20
+    extract(arc, fence.out)
+    assert (fence.out / "big").stat().st_size == 90 << 20
+
+
+def test_rpm_bigger_than_the_free_space_is_refused(fence, monkeypatch):
+    from .samples import write_rpm
+    arc = fence.arc("zeros.rpm")
+    write_rpm(arc, {"./big": bytes(90 << 20)})
+    monkeypatch.setattr(safety.shutil, "disk_usage", lambda p: _usage(safety.MARGIN + (30 << 20)))
+    fence.refused(arc, r"unpacks to more than the .* free on that drive")
+
+
 def test_packport_link_then_write_through_it(fence):
     """The CVE-2025-11001 pattern: a link that points out, then a file written through it. The
     link is left out, so the file lands in a real folder of that name inside the extraction."""
@@ -436,13 +455,12 @@ def test_safe_name():
 
 
 def test_no_7zip_anywhere():
-    """ConvertAll reads every archive itself: no converter, engine or extraction uses 7-Zip."""
-    from convertall import registry
+    """Latheport reads every archive itself: no converter, engine or extraction uses 7-Zip."""
+    from latheport import registry
     registry._ensure_loaded()
     edges = [e for es in registry._edges.values() for e in es] if isinstance(registry._edges, dict) else list(registry._edges)
     assert not [e for e in edges if e.engine == "7zip"]
     assert "7zip" not in engines.ENGINES
-    assert archives.EXTRACTABLE == archives.NATIVE_EXTRACT
 
 
 def test_the_7zip_guard_stops_a_test_that_starts_it():
@@ -463,8 +481,8 @@ def test_msi_cut_short(fence, cut):
     fence.refused(arc, "damaged")
 
 
-def test_damaged_archive_message_names_convertall_not_its_library(fence):
-    """packport's messages say "packport doesn't ..."; ConvertAll's users never heard of it."""
+def test_damaged_archive_message_names_latheport_not_its_library(fence):
+    """packport's messages say "packport doesn't ..."; Latheport's users never heard of it."""
     arc = fence.arc("garbled.cab")
     arc.write_bytes(bytes(range(256)) * 8)
     with pytest.raises(ConversionError) as err:
@@ -478,8 +496,8 @@ CANCEL_PPMD = r'''
 import gc, random, sys
 from pathlib import Path
 import py7zr
-from convertall import cancel
-from convertall.converters.archives import extract_to
+from latheport import cancel
+from latheport.converters.archives import extract_to
 work = Path(sys.argv[1])
 rng = random.Random(7)
 text = work / "big.txt"

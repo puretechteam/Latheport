@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from convertall import registry
-from convertall.detect import detect, strip_ext
-from convertall.errors import EngineMissingError, NoRouteError
-from convertall.pipeline import convert, unique_path
+from latheport import registry
+from latheport.detect import detect, strip_ext
+from latheport.errors import EngineMissingError, NoRouteError
+from latheport.pipeline import convert, unique_path
 
 # ---- detection & naming
 
@@ -117,7 +117,7 @@ def test_common_targets_for_batch():
 # ---- text files of unknown encoding
 
 def test_text_files_in_any_common_encoding(tmp_path):
-    from convertall.textfile import decode
+    from latheport.textfile import decode
     assert decode("café".encode()) == "café"
     assert decode("café".encode("utf-8-sig")) == "café"
     assert decode("café".encode("cp1252")) == "café"  # older Windows files
@@ -138,7 +138,7 @@ def test_windows_1252_csv_converts(tmp_path):
 
 ALL_ROUTES = """
 import hashlib
-from convertall import registry
+from latheport import registry
 registry._ensure_loaded()
 routes = []
 for src in sorted(k for k in registry._edges if k != "*"):

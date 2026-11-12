@@ -15,9 +15,9 @@ import pytest
 from bookport.limits import safe_path
 from PIL import Image, PngImagePlugin
 
-from convertall import assurance, engines, instance, pipeline, safety
-from convertall.converters import maps, media
-from convertall.errors import ConversionError
+from latheport import assurance, engines, instance, pipeline, safety
+from latheport.converters import maps, media
+from latheport.errors import ConversionError
 
 SECRET = "SECRET-TOKEN-4711"
 
@@ -149,7 +149,7 @@ def test_include_lines_cant_read_other_files(tmp_path, src):
     """An include (rST, AsciiDoc, LaTeX, Org, Typst) may read only from the document's folder or one
     up: a downloaded file can't copy another of your files into what it becomes, and the report
     says what was left out."""
-    from convertall.assurance import Report
+    from latheport.assurance import Report
     (tmp_path / "secret.txt").write_text(SECRET)
     name, text = src
     doc = tmp_path / "a" / "b" / name
@@ -250,6 +250,26 @@ def test_ffmpeg_reads_local_files_only(tmp_path, monkeypatch):
     assert args.index("-protocol_whitelist") < args.index("-i")
 
 
+def test_speech_recognition_reads_local_files_only(tmp_path, monkeypatch):
+    """An .mp3 that is really a playlist of web addresses: FFmpeg would fetch them while reading its sound."""
+    from latheport.smart import speech
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def fake_popen(args, **kw):
+        seen.append(args)
+        raise Stop
+    monkeypatch.setattr(engines, "require", lambda key: key)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    with pytest.raises(Stop):
+        speech.sound(tmp_path / "talk.mp3")
+    args = seen[0]
+    assert args[args.index("-protocol_whitelist") + 1] == "file"
+    assert args.index("-protocol_whitelist") < args.index("-i")
+
+
 def test_checking_audio_opens_no_console_window(tmp_path, monkeypatch):
     seen = {}
 
@@ -284,15 +304,15 @@ def test_damaged_pictures_are_refused_plainly(tmp_path, name, head):
 def test_a_launch_never_opens_a_second_window(monkeypatch, tmp_path):
     """The open window holds the lock but doesn't answer: say so instead of opening another."""
     from PySide6.QtCore import QLockFile
-    monkeypatch.setattr(instance, "SERVER_NAME", "ConvertAll-test-busy")
+    monkeypatch.setattr(instance, "SERVER_NAME", "Latheport-test-busy")
     monkeypatch.setattr(instance.tempfile, "gettempdir", lambda: str(tmp_path))
-    held = QLockFile(str(tmp_path / "ConvertAll-test-busy.lock"))
+    held = QLockFile(str(tmp_path / "Latheport-test-busy.lock"))
     assert held.tryLock(0)
     told = []
     monkeypatch.setattr(instance, "WAIT_S", 0.3)
     monkeypatch.setattr(instance, "_busy", lambda: told.append(True))
     monkeypatch.setattr(instance, "forward", lambda *a, **k: False)
-    from convertall import gui
+    from latheport import gui
     monkeypatch.setattr(gui, "run", lambda *a: pytest.fail("opened a second window"))
     assert instance.main([]) == 1
     assert told == [True]
@@ -309,7 +329,7 @@ def test_an_svg_cannot_draw_a_file_from_elsewhere_on_the_computer(tmp_path, how,
     """An SVG's pictures come from inside it (data: URIs). Qt's SVG renderer would load an
     <image> by absolute path, so a downloaded SVG could copy any picture on the computer into
     its result."""
-    from convertall import pdfium
+    from latheport import pdfium
     secret = tmp_path / "secret.png"
     Image.new("RGB", (100, 100), (255, 0, 0)).save(secret)
     docs = tmp_path / "a" / "b" / "docs"
@@ -350,7 +370,7 @@ def test_a_huge_pdf_page_is_drawn_at_a_size_that_fits(tmp_path, dst, monkeypatch
     draw, from a file of a few hundred bytes. Pages are drawn no bigger than PAGE_PIXELS."""
     import pypdfium2
 
-    from convertall.pdfium import PAGE_PIXELS
+    from latheport.pdfium import PAGE_PIXELS
     doc = pypdfium2.PdfDocument.new()
     doc.new_page(14400, 14400)
     src = tmp_path / "huge.pdf"

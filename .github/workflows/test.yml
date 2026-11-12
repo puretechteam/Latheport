@@ -6,7 +6,7 @@ on:
 
 jobs:
   test:
-    # ConvertAll is a Windows app (registry, winget, Explorer menu). The engines most conversions
+    # Latheport is a Windows app (registry, winget, Explorer menu). The engines most conversions
     # need are installed so their tests run; LibreOffice, the big one, gets its own job below.
     runs-on: windows-latest
     strategy:
@@ -18,13 +18,22 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
+      # Chocolatey's installs take 35 to 85 s; one that hangs (one did, for 45 minutes)
+      # fails here instead of holding the job
       - name: Engines
-        run: choco install ffmpeg ghostscript -y --no-progress
+        timeout-minutes: 10
+        run: choco install ffmpeg -y --no-progress
       - run: python -m pip install -e ".[dev]"
       - run: ruff check .
+      # the smart tools' models (about 290 MB), downloaded once and kept until their pins change
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\models
+          key: smart-models-${{ hashFiles('latheport/smart/__init__.py') }}
       - run: python -m pytest -q -rs
         env:
           QT_QPA_PLATFORM: offscreen
+          LATHEPORT_TEST_MODELS: ${{ runner.temp }}\models
 
   office:
     # The same suite with LibreOffice (~350 MB) too, for the office, drawing and metafile routes.
@@ -41,8 +50,14 @@ jobs:
           path: ${{ runner.temp }}\choco-cache
           key: choco-libreoffice-fresh-v1
       - name: Engines
-        run: choco install libreoffice-fresh ffmpeg ghostscript -y --no-progress --cache-location "${{ runner.temp }}\choco-cache"
+        timeout-minutes: 10
+        run: choco install libreoffice-fresh ffmpeg -y --no-progress --cache-location "${{ runner.temp }}\choco-cache"
       - run: python -m pip install -e ".[dev]"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\models
+          key: smart-models-${{ hashFiles('latheport/smart/__init__.py') }}
       - run: python -m pytest -q -rs
         env:
           QT_QPA_PLATFORM: offscreen
+          LATHEPORT_TEST_MODELS: ${{ runner.temp }}\models

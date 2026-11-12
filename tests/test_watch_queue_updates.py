@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from convertall import updates, watch
+from latheport import updates, watch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -136,7 +136,7 @@ def test_a_watched_folder_that_goes_away_is_no_error(tmp_path):
 
 
 def test_run_converts_into_the_converted_folder(tmp_path):
-    from convertall import pipeline
+    from latheport import pipeline
     made = []
     ticks = iter(range(100))
     clock = Clock()
@@ -187,27 +187,27 @@ def release_server(monkeypatch):
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    monkeypatch.setenv("CONVERTALL_UPDATE_URL", f"http://127.0.0.1:{server.server_port}/latest")
+    monkeypatch.setenv("LATHEPORT_UPDATE_URL", f"http://127.0.0.1:{server.server_port}/latest")
     yield answer
     server.shutdown()
     server.server_close()
 
 
 def test_latest_release_is_read_and_nothing_else_is_sent(release_server):
-    release_server["data"] = {"tag_name": "v9.1.0", "html_url": "https://github.com/puretechteam/ConvertAll/releases/tag/v9.1.0"}
-    assert updates.latest() == ("9.1.0", "https://github.com/puretechteam/ConvertAll/releases/tag/v9.1.0")
-    assert release_server["agent"].startswith("ConvertAll/")
+    release_server["data"] = {"tag_name": "v9.1.0", "html_url": "https://github.com/puretechteam/Latheport/releases/tag/v9.1.0"}
+    assert updates.release() == updates.Release("9.1.0", "https://github.com/puretechteam/Latheport/releases/tag/v9.1.0")
+    assert release_server["agent"].startswith("Latheport/")
 
 
 @pytest.mark.parametrize("data", [
     {"tag_name": "v9.1.0", "html_url": "https://evil.example/download"},       # a page that isn't ours
-    {"tag_name": "v9.1.0", "html_url": "https://github.com/puretechteam/ConvertAll", "prerelease": True},
-    {"tag_name": "nightly", "html_url": "https://github.com/puretechteam/ConvertAll"},
+    {"tag_name": "v9.1.0", "html_url": "https://github.com/puretechteam/Latheport", "prerelease": True},
+    {"tag_name": "nightly", "html_url": "https://github.com/puretechteam/Latheport"},
     ["not", "a", "release"],
 ])
 def test_odd_answers_are_ignored(release_server, data):
     release_server["data"] = data
-    assert updates.latest() is None
+    assert updates.release() is None
 
 
 def test_an_answer_that_is_not_http_is_no_error(monkeypatch):
@@ -222,19 +222,19 @@ def test_an_answer_that_is_not_http_is_no_error(monkeypatch):
 
     thread = threading.Thread(target=answer, daemon=True)
     thread.start()
-    monkeypatch.setenv("CONVERTALL_UPDATE_URL", f"http://127.0.0.1:{listener.getsockname()[1]}/latest")
+    monkeypatch.setenv("LATHEPORT_UPDATE_URL", f"http://127.0.0.1:{listener.getsockname()[1]}/latest")
     try:
-        assert updates.latest(timeout=5) is None
+        assert updates.release(timeout=5) is None
     finally:
         thread.join(5)
         listener.close()
 
 
 def test_no_network_is_no_error(monkeypatch):
-    monkeypatch.setenv("CONVERTALL_UPDATE_URL", "http://127.0.0.1:9/latest")  # nothing listens there
-    assert updates.latest(timeout=1) is None
-    monkeypatch.setenv("CONVERTALL_UPDATE_URL", "ftp://example.com/latest")
-    assert updates.latest() is None
+    monkeypatch.setenv("LATHEPORT_UPDATE_URL", "http://127.0.0.1:9/latest")  # nothing listens there
+    assert updates.release(timeout=1) is None
+    monkeypatch.setenv("LATHEPORT_UPDATE_URL", "ftp://example.com/latest")
+    assert updates.release() is None
 
 
 # ---- the window
@@ -242,8 +242,8 @@ def test_no_network_is_no_error(monkeypatch):
 @pytest.fixture
 def window(tmp_path, monkeypatch):
     QtCore = pytest.importorskip("PySide6.QtCore")
-    from convertall import gui
-    from convertall.qtdraw import app as qt_app
+    from latheport import gui
+    from latheport.qtdraw import app as qt_app
     app = qt_app()
     settings = QtCore.QSettings(str(tmp_path / "settings.ini"), QtCore.QSettings.IniFormat)
     monkeypatch.setattr(gui, "QSettings", lambda *a: settings)
@@ -260,7 +260,7 @@ class FakeJob:
 
 
 def test_files_dropped_while_converting_wait_their_turn(window, tmp_path, monkeypatch):
-    from convertall import gui
+    from latheport import gui
     a, b, c = (picture(tmp_path / f"{n}.png") for n in "abc")
     started = []
     monkeypatch.setattr(gui.Job, "start", lambda job: started.append(job))  # the job is made, never run
@@ -285,7 +285,7 @@ def test_files_dropped_while_converting_wait_their_turn(window, tmp_path, monkey
 def test_cancel_stops_the_queue_too(window, tmp_path):
     a, b = picture(tmp_path / "a.png"), picture(tmp_path / "b.png")
     window.set_files([a])
-    from convertall import gui
+    from latheport import gui
     window.job = gui.Job([a], "webp", [])
     window.entry = gui.QueueEntry([a], "webp", state="converting")
     window.set_files([b])
@@ -314,7 +314,7 @@ def test_watched_folder_converts_into_converted(window, tmp_path, monkeypatch):
 
 
 def test_closing_while_watching_goes_to_the_notification_area_only_when_asked(window, tmp_path, monkeypatch):
-    from convertall import gui
+    from latheport import gui
     folder = tmp_path / "inbox"
     folder.mkdir()
     window.set_watch_list([{"folder": str(folder), "target": "pdf"}])
@@ -329,29 +329,44 @@ def test_closing_while_watching_goes_to_the_notification_area_only_when_asked(wi
 
 
 def test_update_link_shows_and_the_check_can_be_turned_off(window, monkeypatch):
-    from convertall import gui
+    from latheport import gui
     asked = []
 
     class Fake:
         def __init__(self, *a):
             self.found = type("S", (), {"connect": lambda _s, fn: asked.append(fn)})()
+            self.finished = type("S", (), {"connect": lambda _s, fn: None})()
+
+        def isRunning(self):
+            return False
 
         def start(self):
-            asked[-1]("9.0.0", "https://github.com/puretechteam/ConvertAll/releases/tag/v9.0.0")
+            asked[-1]("9.0.0", "https://github.com/puretechteam/Latheport/releases/tag/v9.0.0")
     monkeypatch.setattr(gui, "UpdateJob", Fake)
     window.check_updates(now=10 * updates.EVERY_S)
-    assert window.update_link.isVisibleTo(window) and "9.0.0" in window.update_link.text()
+    assert window.update_bar.isVisibleTo(window) and "9.0.0" in window.update_note.text()
     window.update_job = None
     window.check_updates(now=10 * updates.EVERY_S + 60)  # asked already today
     assert len(asked) == 1
     window.update_action.setChecked(False)
-    assert not window.update_link.isVisibleTo(window)
+    assert not window.update_bar.isVisibleTo(window)
     window.check_updates(now=20 * updates.EVERY_S)
     assert len(asked) == 1
 
 
+def test_not_now_hides_that_version_for_good(window):
+    window.show_update("9.0.0", "https://github.com/puretechteam/Latheport/releases/tag/v9.0.0")
+    assert window.update_bar.isVisibleTo(window)
+    window.dismiss_update()
+    assert not window.update_bar.isVisibleTo(window)
+    window.show_update("9.0.0", "https://github.com/puretechteam/Latheport/releases/tag/v9.0.0")
+    assert not window.update_bar.isVisibleTo(window)  # not that one again
+    window.show_update("9.1.0", "https://github.com/puretechteam/Latheport/releases/tag/v9.1.0")
+    assert window.update_bar.isVisibleTo(window) and "9.1.0" in window.update_note.text()  # a newer one is
+
+
 def test_opening_the_window_doesnt_load_the_web_code():
     """Only the update check needs it, once a day, and it was 30% of what the window imports."""
-    code = "import sys, convertall.gui; print('http.client' in sys.modules, 'email.parser' in sys.modules)"
+    code = "import sys, latheport.gui; print('http.client' in sys.modules, 'email.parser' in sys.modules)"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
     assert out.split() == ["False", "False"]

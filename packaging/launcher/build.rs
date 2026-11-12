@@ -1,4 +1,4 @@
-//! Gives `convertall-cli.exe` ConvertAll's icon: a resource script compiled with the Windows SDK's
+//! Gives `latheport-cli.exe` Latheport's icon: a resource script compiled with the Windows SDK's
 //! rc.exe and linked in. Without the SDK the exe is built without an icon.
 
 use std::path::PathBuf;
@@ -17,10 +17,10 @@ fn rc_exe() -> Option<PathBuf> {
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let icon = manifest.join("..").join("..").join("convertall").join("assets").join("icon.ico");
+    let icon = manifest.join("..").join("..").join("latheport").join("assets").join("icon.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
     let Some(rc) = rc_exe() else {
-        println!("cargo:warning=rc.exe (Windows SDK) not found: convertall-cli.exe gets no icon");
+        println!("cargo:warning=rc.exe (Windows SDK) not found: latheport-cli.exe gets no icon");
         return;
     };
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -31,6 +31,6 @@ fn main() {
     if matches!(ok, Ok(true)) {
         println!("cargo:rustc-link-arg-bins={}", res.display());
     } else {
-        println!("cargo:warning=rc.exe failed: convertall-cli.exe gets no icon");
+        println!("cargo:warning=rc.exe failed: latheport-cli.exe gets no icon");
     }
 }

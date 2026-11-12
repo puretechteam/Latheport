@@ -7,11 +7,11 @@ import pymupdf
 import pytest
 from PIL import Image
 
-from convertall import registry
-from convertall.detect import detect
-from convertall.errors import ConversionError
-from convertall.formats import COMMON_TARGETS, FORMATS, suggest
-from convertall.pipeline import convert, extract
+from latheport import registry
+from latheport.detect import detect
+from latheport.errors import ConversionError
+from latheport.formats import COMMON_TARGETS, FORMATS, suggest
+from latheport.pipeline import convert, extract
 
 from .conftest import needs
 from .samples import Samples, picture, write_rar
@@ -217,7 +217,7 @@ def test_files_dated_before_1980_go_into_a_zip(tmp_path):
     # ZIP's DOS dates start in 1980; a file from an old RPM or tar dated 1970 used to stop the zip
     import os
 
-    from convertall.converters.archives import compress
+    from latheport.converters.archives import compress
     folder = tmp_path / "old"
     folder.mkdir()
     (folder / "a.txt").write_text("from 1970")
@@ -258,7 +258,7 @@ def _convert_on_windows_platform(src: Path, fmt: str, out_dir: Path) -> Path:
     import subprocess
     import sys
     env = {k: v for k, v in os.environ.items() if k != "QT_QPA_PLATFORM"}
-    code = (f"from convertall.pipeline import convert; print(convert(r'{src}', '{fmt}', out_dir=r'{out_dir}'))")
+    code = (f"from latheport.pipeline import convert; print(convert(r'{src}', '{fmt}', out_dir=r'{out_dir}'))")
     p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=300, check=False)
     assert p.returncode == 0, p.stderr[-800:]
     return Path(p.stdout.strip().splitlines()[-1])
@@ -285,3 +285,23 @@ def test_xps_printed_by_windows_keeps_its_text(tmp_path):
     src = Path(__file__).parent / "data" / "archives" / "test_compat_zip_7.xps"
     with pymupdf.open(_convert_on_windows_platform(src, "pdf", tmp_path)) as doc:
         assert "test XPS file created with Win XP XPS printer" in doc[0].get_text()
+
+
+def test_xps_pages_are_read_once_and_a_broken_one_says_which(samples, tmp_path, monkeypatch):
+    """Each page's XML was parsed twice (the first page three times); and a page that wasn't XML came out as a raw
+    ParseError when it was any page but the first."""
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from latheport import qtdraw
+    reads = []
+    real = qtdraw.Xps._xml
+    monkeypatch.setattr(qtdraw.Xps, "_xml", lambda self, name, base="/": (reads.append(name), real(self, name, base))[1])
+    assert qtdraw.xps_to_pdf(samples("xps"), tmp_path / "a.pdf") == 2
+    assert sorted(r for r in reads if r.endswith(".fpage")) == ["/Documents/1/Pages/1.fpage", "/Documents/1/Pages/2.fpage"]
+    broken = tmp_path / "broken.xps"
+    with zipfile.ZipFile(samples("xps")) as zin, zipfile.ZipFile(broken, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item)
+            zout.writestr(item, b"<FixedPage" if item.filename.endswith("2.fpage") else data)
+    with pytest.raises(ConversionError, match="page 2"):
+        qtdraw.xps_to_pdf(broken, tmp_path / "b.pdf")

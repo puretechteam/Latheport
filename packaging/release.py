@@ -1,7 +1,7 @@
-"""Build the app and zip it for a GitHub release: dist/ConvertAll-<version>-windows.zip.
+"""Build the app and zip it for a GitHub release: dist/Latheport-<version>-windows.zip.
 
     .venv\\Scripts\\python packaging\\release.py
-    gh release create v<version> dist\\ConvertAll-<version>-windows.zip --notes-file <notes>
+    gh release create v<version> dist\\Latheport-<version>-windows.zip --notes-file <notes>
 
 The zip has a licenses folder: every bundled component's license, the standard texts those need
 (packaging/licenses), and a list of what's inside with where each one's source is.
@@ -18,9 +18,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TEXTS = Path(__file__).resolve().parent / "licenses"  # GPL and LGPL, which some components only name
 sys.path.insert(0, str(ROOT))
-from convertall import __version__
+from latheport import __version__
 
-SOURCE = "https://github.com/puretechteam/ConvertAll"
+SOURCE = "https://github.com/puretechteam/Latheport"
 LICENSE_FILES = ("license", "licence", "copying", "notice", "copyright", "authors", "credits")
 
 # parts inside a bundled package that its wheel names no license for: the libraries pillow-heif's
@@ -39,6 +39,9 @@ INSIDE = {
     "pyside6-essentials": [("Qt 6 (inside PySide6)", "LGPL-3.0-only", "https://download.qt.io/official_releases/qt/",
                             ["LGPL-3.0.txt", "GPL-3.0.txt"])],
 }
+# the fonts text on pictures and videos is drawn with (latheport/assets/fonts, packaging/make_fonts.py)
+FONTS = [("Inter", "https://github.com/rsms/inter"), ("Lora", "https://github.com/cyrealtype/Lora-Cyrillic"),
+         ("Anton", "https://github.com/googlefonts/AntonFont"), ("Caveat", "https://github.com/googlefonts/caveat")]
 # license files kept here for packages that ship none (cobble names its license only in its README)
 OWN = {"cobble": ["cobble-LICENSE.txt"]}
 # standard texts for licenses a package names in its metadata without shipping the text
@@ -73,7 +76,7 @@ VC_RUNTIME = {"vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp14
 def missing_runtime(folder: Path) -> list[tuple[Path, str]]:
     """Programs at the top of folder that import a Visual C++ runtime DLL that isn't beside them.
     On a computer without the redistributable they don't start ("VCRUNTIME140.dll was not
-    found"): the copy in _internal is found only by what runs inside ConvertAll.exe."""
+    found"): the copy in _internal is found only by what runs inside Latheport.exe."""
     import pefile
     found = []
     for exe in sorted(folder.glob("*.exe")):
@@ -106,7 +109,7 @@ def bundled(build: Path, internal: Path) -> list[Component]:
     """Every installed distribution with code in the build, and the parts inside them."""
     tops = _top_names(build, internal)
     owners = metadata.packages_distributions()
-    dists = {d for name in tops for d in owners.get(name, [])} - {"convertall"}  # the app: LICENSE.txt
+    dists = {d for name in tops for d in owners.get(name, [])} - {"latheport"}  # the app: LICENSE.txt
     out = []
     present = {p.name.lower() for p in internal.rglob("*") if p.suffix.lower() in (".pyd", ".dll")}
     for name in sorted(dists, key=str.lower):
@@ -172,15 +175,19 @@ def write_licenses(dest: Path, parts: list[Component]) -> list[str]:
     if missing:
         return missing
     dest.mkdir(parents=True)
-    lines = ["Third-party components in this download of ConvertAll",
+    from latheport import smart
+    lines = ["Third-party components in this download of Latheport",
              "",
-             f"ConvertAll's own code is under the MIT license (LICENSE.txt); its source is at {SOURCE}.",
+             f"Latheport's own code is under the MIT license (LICENSE.txt); its source is at {SOURCE}.",
              "This download also contains the components below, each under its own license: their license",
              "files are in this folder. x265 (inside pillow-heif, used to save HEIC pictures) is licensed under the",
              "GNU GPL version 2 or later, so this download as a whole is distributed under the GPL's terms. Each",
              "component's source is at the address listed with it.",
-             "gmsh (for STEP, IGES and BREP parts) isn't included: ConvertAll downloads it from PyPI the first time",
+             "gmsh (for STEP, IGES and BREP parts) isn't included: Latheport downloads it from PyPI the first time",
              "it's needed, under its own license (GPL-2.0-or-later).",
+             "The smart tools aren't included either: ONNX Runtime (MIT, github.com/microsoft/onnxruntime) and each",
+             "tool's model are downloaded the first time one is needed, each under its own license:",
+             *[f"  {t.name}: {t.licence}, {t.source}" for t in smart.TOOLS.values()],
              ""]
     for c in parts:
         folder = dest / c.name.split(" (")[0].replace("/", "_")
@@ -201,23 +208,23 @@ def write_licenses(dest: Path, parts: list[Component]) -> list[str]:
 
 
 def build_launcher() -> Path:
-    """convertall-cli.exe (packaging/launcher, Rust): build paths in it are made relative, and the
+    """latheport-cli.exe (packaging/launcher, Rust): build paths in it are made relative, and the
     C runtime is linked in, so it starts on a computer without the Visual C++ redistributable."""
     import os
     env = dict(os.environ, RUSTFLAGS=f"--remap-path-prefix={Path.home()}=~ -C target-feature=+crt-static")
     manifest = ROOT / "packaging" / "launcher" / "Cargo.toml"
     subprocess.run(["cargo", "build", "--release", "--manifest-path", str(manifest)], env=env, check=True)
-    return manifest.parent / "target" / "release" / "convertall-cli.exe"
+    return manifest.parent / "target" / "release" / "latheport-cli.exe"
 
 
 def main() -> int:
     if shutil.which("cargo") is None:
-        print("Not built: convertall-cli.exe needs Rust's cargo (https://rustup.rs)")
+        print("Not built: latheport-cli.exe needs Rust's cargo (https://rustup.rs)")
         return 1
     launcher = build_launcher()
-    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "ConvertAll.spec"], cwd=ROOT, check=True)
-    app = ROOT / "dist" / "ConvertAll"
-    shutil.copyfile(launcher, app / "convertall-cli.exe")
+    subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "Latheport.spec"], cwd=ROOT, check=True)
+    app = ROOT / "dist" / "Latheport"
+    shutil.copyfile(launcher, app / "latheport-cli.exe")
     if found := leaks(app):
         print("Not zipped: these files name this computer's home folder (rebuild them without it):")
         for p in found:
@@ -229,11 +236,12 @@ def main() -> int:
             print(f"  {exe.name}: {dll}")
         return 1
     shutil.copyfile(ROOT / "LICENSE", app / "LICENSE.txt")
-    if missing := write_licenses(app / "licenses", bundled(ROOT / "build" / "ConvertAll", app / "_internal")):
+    fonts = [Component(f"{name} (font)", "", "OFL-1.1", url, [TEXTS / f"{name}-OFL.txt"]) for name, url in FONTS]
+    if missing := write_licenses(app / "licenses", bundled(ROOT / "build" / "Latheport", app / "_internal") + fonts):
         print("Not zipped: no license text found for", ", ".join(missing))
         return 1
-    base = ROOT / "dist" / f"ConvertAll-{__version__}-windows"
-    # the zip holds one ConvertAll folder with ConvertAll.exe, convertall-cli.exe, _internal and
+    base = ROOT / "dist" / f"Latheport-{__version__}-windows"
+    # the zip holds one Latheport folder with Latheport.exe, latheport-cli.exe, _internal and
     # the licenses; deflate at its strongest
     import zipfile
     zip_path = base.parent / (base.name + ".zip")  # not with_suffix: "1.4.0-windows" has a dot in it

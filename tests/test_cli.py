@@ -5,9 +5,9 @@ import sys
 
 import pytest
 
-from convertall import cli, engines
-from convertall.cli import main
-from convertall.errors import ConversionError
+from latheport import cli, engines
+from latheport.cli import main
+from latheport.errors import ConversionError
 
 
 def test_list(png, capsys):
@@ -83,14 +83,14 @@ def test_piped_json_is_utf8(tmp_path):
     from PIL import Image
     src = tmp_path / "café.png"
     Image.new("RGB", (4, 4)).save(src)
-    out = subprocess.run([sys.executable, "-m", "convertall", str(src), "--to", "jpg", "--plan", "--json"],
+    out = subprocess.run([sys.executable, "-m", "latheport", str(src), "--to", "jpg", "--plan", "--json"],
                          capture_output=True, check=True).stdout
     got = json.loads(out.decode("utf-8"))  # a script reading the pipe gets UTF-8, whatever the console uses
     assert got["source"] == str(src) and got["route"] == "PNG → JPG"
 
 
 def test_install_question_keeps_json_output_clean(monkeypatch, capsys):
-    from convertall import cli
+    from latheport import cli
     monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
     monkeypatch.setattr("builtins.input", lambda *a: "n")
     assert cli._ask_install(["ffmpeg"], assume_yes=False) is False
@@ -99,30 +99,39 @@ def test_install_question_keeps_json_output_clean(monkeypatch, capsys):
 
 
 def test_plan_on_a_file_that_cant_be_read_says_so(png, monkeypatch, capsys):
-    from convertall import cli
+    from latheport import pipeline
 
     def locked(path):
         raise PermissionError(13, "The file is in use by another program", str(path))
-    monkeypatch.setattr(cli, "detect", locked)
+    monkeypatch.setattr(pipeline, "detect", locked)
     assert main([str(png), "--to", "jpg", "--plan", "--json"]) != 0
     line = json.loads(capsys.readouterr().out.splitlines()[0])
     assert line["source"].endswith("pic.png") and "in use" in line["error"]
 
 
+def test_plan_from_python_is_what_the_command_line_shows(png, capsys):
+    """`from latheport import plan` (as the README and the package promise) gives what --plan --json prints."""
+    from latheport import plan
+    p = plan(png, "jpg", {"quality": 70})
+    assert p["route"] == "PNG → JPG" and p["settings"] == {"quality": 70} and "quality" in p["takes"]
+    assert main([str(png), "--to", "jpg", "--quality", "70", "--plan", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out.splitlines()[0]) == json.loads(json.dumps(p))
+
+
 def test_view_without_the_window_app_says_so(tmp_path, monkeypatch, capsys):
-    from convertall import cli
+    from latheport import cli
     model = tmp_path / "cube.obj"
     model.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
     monkeypatch.setattr(cli.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(cli.sys, "executable", str(tmp_path / "convertall-cli.exe"))
+    monkeypatch.setattr(cli.sys, "executable", str(tmp_path / "latheport-cli.exe"))
     monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(a)))
     assert cli.cmd_view([model]) == 1
-    assert "ConvertAll.exe" in capsys.readouterr().err
+    assert "Latheport.exe" in capsys.readouterr().err
 
 
 def test_a_damaged_archive_extracts_to_a_message(tmp_path, monkeypatch):
-    from convertall import pipeline
-    from convertall.converters import archives
+    from latheport import pipeline
+    from latheport.converters import archives
     src = tmp_path / "a.zip"
     src.write_bytes(b"PK\x03\x04broken")
     monkeypatch.setattr(archives, "extract_to", lambda *a, **k: (_ for _ in ()).throw(KeyError("odd")))
@@ -153,7 +162,7 @@ def test_ctrl_c_stops_the_conversion_cleanly(tmp_path, monkeypatch, capsys):
     end the program wherever it was, which could leave a half-written temporary folder.)"""
     import signal
 
-    from convertall import cancel
+    from latheport import cancel
     started = []
 
     def slow_convert(path, target, out, report=None, options=None):
@@ -190,7 +199,7 @@ def test_install_question_with_nobody_to_answer(monkeypatch, capsys):
 def test_terminal_tool_never_ends_in_a_crash_window():
     """An exception that leaves gui_entry.py becomes a pop-up in the built exe, so --cli stops at it."""
     code = ("import runpy, sys\n"
-            "import convertall.cli as c\n"
+            "import latheport.cli as c\n"
             "def boom(argv): raise RuntimeError('boom')\n"
             "c.main = boom\n"
             "sys.argv = ['x', '--cli']\n"

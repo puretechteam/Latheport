@@ -6,8 +6,8 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from convertall import cancel, gui, pipeline
-from convertall.safety import Budget, copy_capped
+from latheport import cancel, gui, pipeline
+from latheport.safety import Budget, copy_capped
 
 MB = 1 << 20
 
@@ -40,7 +40,7 @@ def test_copy_reports_bytes_against_the_declared_total(tmp_path, monkeypatch):
 
 
 def test_the_status_line_shows_mb_done_for_big_archives(tmp_path, monkeypatch):
-    from convertall.qtdraw import app as qt_app
+    from latheport.qtdraw import app as qt_app
     qt_app()  # kept for the whole session
     (tmp_path / "big.zip").write_bytes(b"x")
     (tmp_path / "small.zip").write_bytes(b"x")

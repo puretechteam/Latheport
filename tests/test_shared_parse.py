@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from convertall import Report, convert, registry
+from latheport import Report, convert, registry
 
 from .samples import Samples
 

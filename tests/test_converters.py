@@ -6,9 +6,9 @@ import pytest
 import yaml
 from PIL import Image
 
-from convertall.assurance import Report
-from convertall.errors import ConversionError
-from convertall.pipeline import convert, extract
+from latheport.assurance import Report
+from latheport.errors import ConversionError
+from latheport.pipeline import convert, extract
 
 from .conftest import needs
 
@@ -84,9 +84,9 @@ def test_svg_to_png(tmp_path):
 
 def test_markdown_to_pdf_has_text(tmp_path):
     md = tmp_path / "notes.md"
-    md.write_text("# Hello\n\nConvertAll *works*.\n", encoding="utf-8")
+    md.write_text("# Hello\n\nLatheport *works*.\n", encoding="utf-8")
     with pymupdf.open(convert(md, "pdf")) as doc:
-        assert "ConvertAll works" in doc[0].get_text()
+        assert "Latheport works" in doc[0].get_text()
 
 
 def test_txt_to_pdf_and_pdf_to_txt(tmp_path):
@@ -224,7 +224,7 @@ def test_zip_slip_blocked(tmp_path):
 
 @needs("ffmpeg")
 def test_audio_and_video(tmp_path):
-    from convertall import engines
+    from latheport import engines
     ff = engines.find("ffmpeg")
     wav, mp4 = tmp_path / "tone.wav", tmp_path / "clip.mp4"
     engines.run([ff, "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", str(wav)])
@@ -256,13 +256,13 @@ def test_office_documents(tmp_path):
 
 @needs("libreoffice")
 def test_office_documents_from_two_processes_at_once(tmp_path):
-    """Two ConvertAll processes share one LibreOffice profile; the second used to fail (exit 1)."""
+    """Two Latheport processes share one LibreOffice profile; the second used to fail (exit 1)."""
     import subprocess
     import sys
     procs = []
     for i in range(2):
         (tmp_path / f"d{i}.txt").write_text(f"Document {i}\n" * 40, encoding="utf-8")
-        procs.append(subprocess.Popen([sys.executable, "-m", "convertall", str(tmp_path / f"d{i}.txt"), "--to", "pdf",
+        procs.append(subprocess.Popen([sys.executable, "-m", "latheport", str(tmp_path / f"d{i}.txt"), "--to", "pdf",
                                        "-o", str(tmp_path / f"o{i}")], stdout=subprocess.PIPE, stderr=subprocess.PIPE))
     for i, p in enumerate(procs):
         _out, err = p.communicate(timeout=300)
@@ -294,7 +294,7 @@ def test_html_to_markdown(tmp_path):
 def test_pdf_to_markup_keeps_the_text(tmp_path, fmt):
     """LibreOffice opens a PDF as positioned text boxes: routes through ODT used to come out empty.
     The text of both pages must arrive (a markup file with pictures comes back as a folder)."""
-    from convertall import Report
+    from latheport import Report
 
     from .samples import Samples
     report = Report()  # the window's way: the route is chosen with what this PDF holds
@@ -311,7 +311,7 @@ def test_pdf_to_markup_keeps_the_text(tmp_path, fmt):
 def test_tiny_pictures_make_an_ogv_that_plays(tmp_path, size):
     """FFmpeg can't read back Theora under 18 pixels a side, so it wrote OGV files that no player
     opened: small pictures are enlarged (keeping their shape) and the report says why."""
-    from convertall import Report, assurance
+    from latheport import Report, assurance
     src = tmp_path / "tiny.png"
     Image.new("RGB", size, (200, 30, 30)).save(src)
     report = Report()

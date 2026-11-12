@@ -6,9 +6,9 @@ import bookport
 import pymupdf
 import pytest
 
-from convertall import Report, pipeline, registry
-from convertall.converters import ebooks
-from convertall.errors import ConversionError
+from latheport import Report, pipeline, registry
+from latheport.converters import ebooks
+from latheport.errors import ConversionError
 
 from .samples import TEXT, Samples
 
