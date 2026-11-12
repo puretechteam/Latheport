@@ -1003,7 +1003,7 @@ class EditorWindow(Frameless, QWidget):
             self.synced = True
         self._sync_player()
         pb.set_speed(float(self.edits.times.get(self.current(), {}).get("speed") or 1))
-        pb.play()
+        pb.play(until=self.timeline.end)
         self._play_icon(True)
 
     def step(self, frames: int) -> None:

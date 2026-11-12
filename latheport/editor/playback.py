@@ -55,6 +55,16 @@ def _presenter_class():
                 return self._size
 
         def present(self, frame) -> None:
+            bridge = self.bridge
+            held = bridge._held
+            if held is not None and frame.wall > held + 1e-3:  # past where it stopped: frames already on their way
+                frame.release()
+                return
+            until = bridge.until
+            if until is not None and frame.wall >= until - 1e-3:
+                # the end of the part kept: stopped here, on the player's thread, so a busy window can't miss it
+                bridge.until, bridge._held = None, frame.wall
+                bridge.player.pause()
             n = frame.w * frame.h * 4
             image = QImage(frame.w, frame.h, QImage.Format_RGB32)  # its rows are w * 4 bytes, as the frame's are
             memoryview(image.bits())[:n] = memoryview(frame.buf)[:n]  # one copy (it was two: to bytes, then .copy())
@@ -90,8 +100,10 @@ class Playback(QObject):
         self.presenter = _presenter_class()(self)
         self.player = Player(Source([Chunk(str(path), 0.0, ffprobe=ffprobe or _ffprobe())]), ffmpeg=ffmpeg,
                              presenter=self.presenter, audio=SOUND)
-        self.playing = False
+        self.playing = False  # asked to play and not paused since: a moment of loading doesn't change it
         self.ended = False
+        self.until = None     # where to stop (the end of the part kept), read on the player's thread
+        self._held = None     # where it stopped there: later frames already on their way are dropped
         self._arrived.connect(self._show)
         self._state.connect(self._changed)
         self.player.on_state = lambda s, _info: self._state.emit(s)  # the player's thread: queued to the window's
@@ -102,7 +114,12 @@ class Playback(QObject):
             self.frame.emit(*got)
 
     def _changed(self, state: str) -> None:
-        self.playing = state == "playing"
+        # "loading" and "gap" come and go while it plays (a slow PC waiting on the decoder): still playing then,
+        # so Pause pauses and the end of the part kept still stops it
+        if state == "playing":
+            self.playing = True
+        elif state not in ("loading", "gap"):
+            self.playing = False
         self.ended = state == "ended"
         self.state.emit(state)
 
@@ -110,19 +127,24 @@ class Playback(QObject):
         self.presenter.set_size(w, h)
         self.player.resize()
 
-    def play(self) -> None:
+    def play(self, until: float | None = None) -> None:
+        """Play on from here, stopping at until (seconds) when given."""
         self.playing = True
+        self.until, self._held = until, None
         self.player.play()
 
     def pause(self) -> None:
         self.playing = False
+        self.until = None
         self.player.pause()
 
     def seek(self, seconds: float) -> None:
+        self.until, self._held = None, None
         self.player.seek(max(0.0, seconds))
 
     def step(self, frames: int) -> None:
         self.playing = False
+        self.until, self._held = None, None
         self.player.step(frames)
 
     def set_speed(self, speed: float) -> None:

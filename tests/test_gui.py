@@ -1282,7 +1282,7 @@ def test_editor_trims_steps_and_paces_each_video_on_its_own(window, tmp_path, ap
     e.trim_here("end")  # O: it ends where it is
     assert e.edits.times[a] == {"start": "0:01", "end": "0:03"} and e.trim_note.text() == "From 0:01.0 to 0:03.0: 0:02.0 kept"
     e.step(1)
-    assert _pump(app, lambda: abs(e.video_time - 3.04) < 0.005, 10)  # one frame on: 1/25 s
+    assert _pump(app, lambda: abs(e.video_time - 3.04) < 0.005, 10), e.video_time  # one frame on: 1/25 s
     e.speed_box.setCurrentIndex(e.speed_box.findData("2"))
     e.speed_box.activated.emit(e.speed_box.currentIndex())
     assert e.edits.times[a]["speed"] == "2"
@@ -1329,6 +1329,46 @@ def test_space_plays_and_pauses_a_video_but_space_drag_looks_around(window, tmp_
 
 
 @needs("ffmpeg")
+def test_pause_pauses_while_the_player_is_loading(window, tmp_path, app):
+    """On a slow PC the player says "loading" now and then while it plays: Pause took that for paused and
+    started it again instead (on CI the button showed Pause after it was pressed)."""
+    e = _editor(window, [_clip(tmp_path)], "mp4")
+    e.toggle_play()
+    assert _pump(app, lambda: e.video_time > 1.2, 10)
+    e.playback._changed("loading")  # what the player sends while it waits on the decoder
+    assert e.playback.playing
+    e.toggle_play()
+    assert e.play_btn.icon == "play" and not e.playback.playing
+    assert _pump(app, lambda: not e.playback.player.playing, 5)  # the player itself paused
+    e.close()
+
+
+@needs("ffmpeg")
+def test_the_end_of_the_part_kept_stops_it_even_when_the_window_is_busy(window, tmp_path, app):
+    """The stop at the end of a trim waited for the window to see a frame past it: with the window busy (on CI)
+    it played on to 2.2 s or to the end. The player's own thread stops it now."""
+    import time
+
+    from PySide6.QtCore import QTimer
+    e = _editor(window, [_clip(tmp_path)], "mp4")
+    e._scrub(1.0)
+    e._trim(end=2.0)
+    busy = QTimer()
+    busy.timeout.connect(lambda: time.sleep(0.25))  # the window thread held up most of the time
+    busy.start(300)
+    try:
+        e.toggle_play()
+        assert _pump(app, lambda: e.video_time > 1.2, 10)
+        assert _pump(app, lambda: not e.playback.player.playing, 10)
+        _pump(app, lambda: False, 0.6)
+    finally:
+        busy.stop()
+    assert abs(e.video_time - 2.0) <= 0.05, e.video_time
+    assert abs(e.playback.player.position - 2.0) <= 0.05, e.playback.player.position
+    e.close()
+
+
+@needs("ffmpeg")
 def test_save_this_frame_puts_a_picture_with_the_edits_next_to_the_video(window, tmp_path, app):
     import numpy as np
     from PIL import Image
@@ -1348,7 +1388,8 @@ def test_save_this_frame_puts_a_picture_with_the_edits_next_to_the_video(window,
         assert np.abs(px[..., 0] - px[..., 1]).max() < 3  # black and white
     e.save_frame()
     assert _pump(app, lambda: e.frame_btn.isEnabled(), 20)
-    assert (tmp_path / "talk at 0-02.0 (1).png").exists()  # never over the first
+    made = sorted(p.name for p in tmp_path.glob("*.png"))
+    assert (tmp_path / "talk at 0-02.0 (1).png").exists(), (made, e.video_time)  # never over the first
     e.close()
 
 
@@ -1832,7 +1873,7 @@ def test_a_video_frame_reaches_the_window_as_the_same_picture(app):
 
         def release(self):
             self.released = True
-    bridge = type("Bridge", (), {"_arrived": type("S", (), {"emit": lambda self: None})()})()
+    bridge = type("Bridge", (), {"_arrived": type("S", (), {"emit": lambda self: None})(), "until": None, "_held": None})()
     presenter = playback._presenter_class()(bridge)
     frame = Frame(64, 36)
     presenter.present(frame)
