@@ -2,6 +2,17 @@
 
 Newest first. Each entry is dated by when it landed.
 
+## 2026-11-12: Latheport 1.5.1, faster 7z, Open with Latheport, fixes for the move from ConvertAll
+
+In numbers (the built 1.5.0 and 1.5.1 taking turns on the same PC): Latheport's own 78 MB download from zip to 7z in 11.2 s and 10.8 s instead of 60.2 s and 59.4 s, 5.4 times faster. Updating from 1.5.0 with *Update now*: the new window was up 10 s after the old one opened.
+
+- **The right-click entry is now Open with Latheport** (it was Convert with Latheport): files and folders open in the window, ready to convert. Archives still get Extract and 3D models View. An existing menu changes the first time 1.5.1 opens.
+- **Making a 7z is 5.4 times faster**, packed on three quarters of the cores (8 at most) instead of one: Latheport's own 78 MB download (187 MB unpacked) from zip to 7z took 11.2 s and 10.8 s instead of 60.2 s and 59.4 s (the built apps taking turns; with other programs busy on the same PC, packing alone took 29 s instead of 79 s). The 7z is 1.3% bigger (55.8 MB instead of 55.0 MB), opens in 7-Zip, Windows' own tar and py7zr with every file the same, and still has the x86 filter and LZMA2 it had. The status line now counts the megabytes packed (*packing 120 of 187 MB*): before, it stopped at the end of unpacking and then sat there for a minute. Cancel now stops packing within a moment too; before, it waited until the 7z was finished.
+- **Fixed: the Start menu shortcut kept starting a copy that had been moved or deleted.** It now follows Latheport the next time you open it from its new folder, as the right-click menu already did.
+- **Fixed: settings left behind when moving from ConvertAll.** They were only carried into a Latheport with no settings at all, so one value set first (by a run from source, say) kept watch folders and the rest behind for good. Now every setting Latheport doesn't have yet comes along, once; Latheport's own stay.
+- **Fixed: a white bar along the top of the window** after dragging it down from maximised (also after double-clicking its header or pressing Win+Down to restore it). The window kept the margin Windows puts round a maximised window: 8 px on every side, white along the top. It's now gone as soon as Windows restores the window (measured with a real drag: 8 px to 0, white top row 100% to 0%). The ☐ button was never affected.
+- **Docs: "Do you want to open this file?" on a downloaded archive.** The README now explains it: Windows asks this when another program (DAEMON Tools, for one) owns that kind of archive without marking it safe. Click *Open* and the extraction goes ahead.
+
 ## 2026-11-12: Latheport 1.5.0 (was ConvertAll), a photo editor, a video timeline, PDF tools, smart tools, no Ghostscript needed
 
 In numbers, against ConvertAll 1.4.0 (both built, the same files on the same PC, taking turns, best of 3): 25 PostScript files to PDF in 2.77 s instead of 4.94 s (1.8x), with no Ghostscript to install (24 MB less); 20 DjVu books to PDF in 61.7 s instead of 76.3 s; 12 RAW photos to PNG in 60.0 s instead of 65.5 s. The download is 78.3 MB, against 77.0 MB for 1.4.0, with the editor, the timeline and the smart tools in it (the smart tools' models download on first use).

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -509,10 +510,11 @@ class Job(QThread):
             errors.append(f"{self.files[0].name}: unexpected {type(exc).__name__}: {exc}")
 
     def _counter(self, line: str):
-        """The status line with the MB written so far, for archives over 50 MB."""
+        """The status line with the MB written (or packed) so far, for archives over 50 MB."""
         def told(done: int, total: int) -> None:
             if total > BIG_ARCHIVE:
-                self.progress.emit(f"{line} · {done >> 20:,} of {total >> 20:,} MB")
+                doing = f"{self.token.doing} " if self.token.doing else ""
+                self.progress.emit(f"{line} · {doing}{done >> 20:,} of {total >> 20:,} MB")
         return told
 
 
@@ -3109,7 +3111,7 @@ class Window(Frameless, QWidget):
             else:
                 install_context_menu()
                 self.set_status("Added to the right-click menu", "ok",
-                                "“Convert with Latheport” on every file, “Extract with Latheport” on "
+                                "“Open with Latheport” on every file, “Extract with Latheport” on "
                                 "archives and “View with Latheport” on 3D models (Windows 11: under "
                                 "Show more options)")
         except OSError as exc:
@@ -3130,7 +3132,7 @@ class Window(Frameless, QWidget):
 
 
 # ---------------------------------------------------------------- Explorer right-click menu
-# "Convert with Latheport" on every file and folder. Archives get "Extract with Latheport"
+# "Open with Latheport" on every file and folder (it opens them in the window, ready to convert). Archives get "Extract with Latheport"
 # instead: a verb under SystemFileAssociations\.<ext> with the same key name as the one under *
 # replaces it for that extension, so Explorer shows one entry, never both. 3D models also get
 # "View with Latheport", under a key of its own, so their Convert stays.
@@ -3290,7 +3292,7 @@ def install_context_menu() -> None:
     import winreg
     remove_context_menu()  # also drops extensions an older build registered
     for key in (_STAR_KEY, _DIR_KEY):
-        _set_verb(key, "Convert with Latheport", _launch_command())
+        _set_verb(key, "Open with Latheport", _launch_command())
     for ext in extract_extensions():
         _set_verb(rf"{_SFA}\.{ext}\{_VERB}", "Extract with Latheport", _launch_command(EXTRACT_MARKER))
     for ext in view_extensions():  # "Single": shown only when one file is selected
@@ -3374,6 +3376,39 @@ def remove_start_menu() -> None:
     start_menu_path().unlink(missing_ok=True)
 
 
+def shortcut_target(lnk: Path) -> str | None:
+    """The program a .lnk starts, read from the file (Microsoft's Shell Link format: the LinkInfo's local path),
+    or None when it can't be told."""
+    try:
+        data = lnk.read_bytes()
+        flags = struct.unpack_from("<I", data, 0x14)[0]
+        at = 0x4C
+        if flags & 0x01:  # HasLinkTargetIDList: skip it
+            at += 2 + struct.unpack_from("<H", data, at)[0]
+        if not flags & 0x02:  # no LinkInfo
+            return None
+        header = struct.unpack_from("<I", data, at + 4)[0]
+        if header >= 0x24:  # the Unicode path is there too
+            off = struct.unpack_from("<I", data, at + 0x1C)[0]
+            end = data.index(b"\0\0", at + off)
+            end += (end - at - off) % 2  # a UTF-16 character ends on an even byte
+            return data[at + off:end].decode("utf-16-le")
+        off = struct.unpack_from("<I", data, at + 0x10)[0]
+        raw = data[at + off:data.index(b"\0", at + off)]
+        return raw.decode("mbcs" if sys.platform == "win32" else "latin-1")
+    except (OSError, struct.error, ValueError, UnicodeDecodeError):
+        return None
+
+
+def start_menu_outdated() -> bool:
+    """True when there's a Start menu shortcut and it starts another copy (this one was moved, or that one
+    deleted). The built app only: from source the shortcut runs Python."""
+    if not getattr(sys, "frozen", False) or not start_menu_installed():
+        return False
+    target = shortcut_target(start_menu_path())
+    return target is not None and os.path.normcase(target) != os.path.normcase(sys.executable)
+
+
 # ---------------------------------------------------------------- entry point
 
 def listen(server: QLocalServer, handle) -> None:
@@ -3416,7 +3451,7 @@ def run(files: list[str], mode: str, lock, after_update: dict | None = None) -> 
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Latheport.Latheport")
 
     # An update brings new right-click entries, and a moved app a new path: refresh a menu that
-    # an older build or another folder registered. Only the installed app does this, so running
+    # an older build or another folder registered, and a Start menu shortcut to another folder. Only the installed app does this, so running
     # from source never repoints the menu.
     from . import migrate
     if getattr(sys, "frozen", False) and sys.platform == "win32":
@@ -3424,6 +3459,11 @@ def run(files: list[str], mode: str, lock, after_update: dict | None = None) -> 
         try:
             if context_menu_outdated():
                 install_context_menu()
+        except OSError:
+            pass
+        try:  # the Start menu shortcut follows too (it kept starting a copy that had been moved or deleted)
+            if start_menu_outdated():
+                install_start_menu()
         except OSError:
             pass
     if migrate.installed():  # watch folders, last formats... into Latheport's empty settings

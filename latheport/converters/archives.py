@@ -160,7 +160,7 @@ CONTAINER = COMIC_CONTAINER | {f: "zip" for f in ZIP_BASED}
 
 def compress(src: Path, dst: Path, fmt: str) -> None:
     """Pack a file or folder (folder name kept as the top-level entry; comics keep pages at the top)."""
-    import py7zr
+    from . import sevenz
     arcname = src.name
     if fmt in COMICS:
         fmt = COMIC_CONTAINER[fmt]
@@ -176,13 +176,13 @@ def compress(src: Path, dst: Path, fmt: str) -> None:
                     zf.write(p, Path(arcname) / p.relative_to(src))
             else:
                 zf.write(src, arcname)
-    elif fmt == "7z":
-        with py7zr.SevenZipFile(dst, "w") as z:
-            if src.is_dir():
-                for p, name in ([(src, arcname)] if arcname else [(p, p.name) for p in sorted(src.iterdir())]):
-                    z.writeall(p, name)
-            else:
-                z.write(src, arcname)
+    elif fmt == "7z":  # packed on several cores (py7zr's one took a minute for 190 MB)
+        if src.is_dir():
+            inside = [(p.relative_to(src).as_posix(), p) for p in sorted(src.rglob("*"))]
+            items = [(arcname, src)] + [(f"{arcname}/{n}", p) for n, p in inside] if arcname else inside
+        else:
+            items = [(arcname, src)]
+        sevenz.write(dst, items)
     elif fmt in TAR_MODE:
         with tarfile.open(dst, TAR_MODE[fmt]) as tf:
             _tar_add(tf, src, arcname)

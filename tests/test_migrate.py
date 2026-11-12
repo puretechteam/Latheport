@@ -65,7 +65,7 @@ def test_a_run_from_source_or_a_test_moves_nothing(homes):
     assert (local / "ConvertAll" / "engines" / "gmsh" / "gmsh.py").exists()
 
 
-def test_settings_come_along_into_an_empty_store(tmp_path):
+def test_settings_come_along_without_replacing_latheports_own(tmp_path):
     old = QtCore.QSettings(str(tmp_path / "old.ini"), QtCore.QSettings.IniFormat)
     for k, v in (("watch/list", '[{"folder": "C:/In", "format": "png"}]'), ("update/skip", "1.4.0"),
                  ("last/png", "webp")):
@@ -77,9 +77,13 @@ def test_settings_come_along_into_an_empty_store(tmp_path):
     assert new.value(migrate.CARRIED) == "ConvertAll"
     old.setValue("update/skip", "9.9.9")
     assert migrate.carry_settings(new, old) == 0 and new.value("update/skip") == "1.4.0"  # only ever once
-    fresh = QtCore.QSettings(str(tmp_path / "used.ini"), QtCore.QSettings.IniFormat)
-    fresh.setValue("theme", "dark")
-    assert migrate.carry_settings(fresh, old) == 0 and fresh.value("watch/list") is None  # Latheport's own stays
+    used = QtCore.QSettings(str(tmp_path / "used.ini"), QtCore.QSettings.IniFormat)
+    used.setValue("options/values", '{"quality": 80}')  # set before the first carry (a run from source did this)
+    used.setValue("last/png", "jpg")
+    assert migrate.carry_settings(used, old) == 2  # the watch folders still come along...
+    assert used.value("watch/list") == '[{"folder": "C:/In", "format": "png"}]' and used.value("update/skip") == "9.9.9"
+    assert used.value("last/png") == "jpg" and used.value("options/values") == '{"quality": 80}'  # ...Latheport's stay
+    assert migrate.carry_settings(used, old) == 0  # and only once
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the right-click menu is Windows'")

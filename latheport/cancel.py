@@ -32,11 +32,12 @@ class Token:
         self._procs: set[subprocess.Popen] = set()
         self.listener = None  # listener(done, total): bytes written so far, of what was expected
         self.expected = self.done = 0
+        self.doing = ""  # what the count is of, when it isn't unpacking: "packing"
         self._told = -1.0
 
-    def expect(self, total: int) -> None:
-        """The bytes the file being worked on will write (an archive's declared size)."""
-        self.expected, self.done, self._told = total, 0, -1.0
+    def expect(self, total: int, doing: str = "") -> None:
+        """The bytes the file being worked on will write (an archive's declared size), or pack."""
+        self.expected, self.done, self.doing, self._told = total, 0, doing, -1.0
 
     def moved(self, n: int) -> None:
         """n more bytes written; the listener hears at most four times a second, and at the end."""
@@ -160,11 +161,11 @@ def check() -> None:
         token.check()
 
 
-def expect(total: int) -> None:
-    """Tell the running conversion's token how many bytes this file will write."""
+def expect(total: int, doing: str = "") -> None:
+    """Tell the running conversion's token how many bytes this file will write (or, doing="packing", pack)."""
     token = _current.get()
     if token is not None:
-        token.expect(total)
+        token.expect(total, doing)
 
 
 def moved(n: int) -> None:

@@ -310,7 +310,7 @@ def test_registers_extract_on_archives_and_convert_elsewhere(monkeypatch):
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{root}\SystemFileAssociations\.zip\shell\Other"):
             pass  # another app's verb on .zip: must survive our removal
         gui.install_context_menu()
-        assert value(gui._STAR_KEY, "MUIVerb") == "Convert with Latheport"
+        assert value(gui._STAR_KEY, "MUIVerb") == "Open with Latheport"
         assert value(gui._STAR_KEY, "Version") == gui.__version__
         zip_verb = rf"{root}\SystemFileAssociations\.zip\shell\Latheport"
         assert value(zip_verb, "MUIVerb") == "Extract with Latheport"
@@ -623,6 +623,27 @@ def test_start_menu_shortcut(tmp_path, monkeypatch):
     assert gui.start_menu_installed() and lnk.read_bytes()[:4] == b"L\0\0\0"  # a real shell link
     gui.remove_start_menu()
     assert not gui.start_menu_installed()
+
+
+@pytest.mark.skipif(not gui.sys.platform.startswith("win"), reason="Windows shortcut")
+def test_the_start_menu_shortcut_follows_a_moved_copy(tmp_path, monkeypatch):
+    """It kept starting a copy that had been moved or deleted: the built app now re-points it when it opens."""
+    lnk = tmp_path / "Programs" / "Latheport.lnk"
+    monkeypatch.setattr(gui, "start_menu_path", lambda: lnk)
+    gui.install_start_menu()  # from source it starts Python
+    target = gui.shortcut_target(lnk)
+    pythonw = Path(gui.sys.executable).with_name("pythonw.exe")
+    assert target and os.path.normcase(target) == os.path.normcase(str(pythonw if pythonw.exists() else gui.sys.executable))
+    assert not gui.start_menu_outdated()  # from source: never touched
+    monkeypatch.setattr(gui.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(gui.sys, "executable", target)
+    assert not gui.start_menu_outdated()  # the copy it starts
+    monkeypatch.setattr(gui.sys, "executable", str(tmp_path / "moved" / "Latheport.exe"))
+    assert gui.start_menu_outdated()  # another copy: this one was moved, or that one deleted
+    lnk.write_bytes(b"L\0\0\0 not really a shortcut")
+    assert not gui.start_menu_outdated()  # can't tell: left alone, never rewritten at every start
+    lnk.unlink()
+    assert not gui.start_menu_outdated()  # none made when there's none
 
 
 def test_preset_is_judged_by_what_this_conversion_takes(window, samples, tmp_path, monkeypatch):
@@ -1452,6 +1473,35 @@ def test_caption_buttons_minimise_maximise_close(window, app):
     window.caption.close.click()
     _pump(app, lambda: not window.isVisible(), 3)
     assert not window.isVisible()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the system frame's messages are Windows' own")
+def test_a_restore_windows_starts_leaves_no_margin_at_the_top(window, app, monkeypatch):
+    """Dragging a maximised window's header down restores it before Qt hears of it: the frame's size is
+    decided by what Windows says (restored), so no white bar is left along the top."""
+    import ctypes
+    from ctypes import wintypes
+
+    from latheport import chrome
+    window.showMaximized()
+    _pump(app, lambda: window.isMaximized(), 3)
+    assert window.isMaximized()  # Qt still says maximised...
+    window._native, window._hwnd = True, 0x1234
+
+    def calc(zoomed):
+        monkeypatch.setattr(ctypes.windll.user32, "IsZoomed", lambda hwnd: zoomed)
+        params = chrome._NCCALCSIZE_PARAMS()
+        params.rgrc[0] = wintypes.RECT(100, 100, 560, 700)
+        msg = wintypes.MSG(0x1234, chrome.WM_NCCALCSIZE, 1, ctypes.addressof(params))
+        assert window.nativeEvent(b"windows_generic_MSG", ctypes.addressof(msg)) == (True, 0)
+        r = params.rgrc[0]
+        return r.left, r.top, r.right, r.bottom
+    try:
+        assert calc(zoomed=False) == (100, 100, 560, 700)  # ...but Windows has restored it: the whole window is ours
+        t = chrome._frame_thickness(0x1234)
+        assert t > 0 and calc(zoomed=True) == (100 + t, 100 + t, 560 - t, 700 - t)  # maximised: off-screen frame taken back
+    finally:
+        window._native = False
 
 
 def test_editor_has_no_title_bar_either(window, tmp_path, app):

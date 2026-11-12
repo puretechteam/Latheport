@@ -3,7 +3,7 @@
 - Files (any launch, the window or the terminal): presets.json is copied, and the downloads (engines such as gmsh,
   the smart tools' runtime and models: hundreds of MB) are moved by renaming their folders, not copied.
 - Settings (the window, before it reads them): watch folders, the last formats, update choices... copied from
-  ConvertAll's store into Latheport's while Latheport's is still empty. ConvertAll's is left as it was.
+  ConvertAll's store into Latheport's, once, where Latheport has none of its own. ConvertAll's is left as it was.
 - Windows (the installed app only, never a run from source): ConvertAll's right-click entries are taken out and
   Latheport's put in their place, pointing at this copy; the Start menu shortcut likewise.
 
@@ -65,10 +65,13 @@ def carry_files() -> list[str]:
 
 
 def carry_settings(new, old) -> int:
-    """Copy every setting from old into new (QSettings), once and only into an empty store. Returns how many."""
-    if new.value(CARRIED) is not None or new.allKeys():
+    """Copy the settings new (QSettings) doesn't have yet from old, once: Latheport's own values stay. Returns how
+    many. (Until 1.5.1 only into an empty store, so one value set before the first carry, by a run from source,
+    kept watch folders and the rest behind for good.)"""
+    if new.value(CARRIED) is not None:
         return 0
-    keys = old.allKeys()
+    have = set(new.allKeys())
+    keys = [k for k in old.allKeys() if k not in have]
     for k in keys:
         new.setValue(k, old.value(k))
     new.setValue(CARRIED, OLD)

@@ -162,7 +162,10 @@ class Frameless:
             change.new = _frame_style(change.new, self._resizable, self._caption.max is not None)
             return False, 0
         if msg.message == WM_NCCALCSIZE and msg.wParam:
-            if self.isMaximized():  # Windows lays a maximised window past the screen by its frame: take it back
+            # Windows lays a maximised window past the screen by its frame: take it back. Asked of Windows, not
+            # Qt: a restore Windows starts (dragging the header down, Win+Down) arrives here before Qt hears of
+            # it, and the margin kept on the restored window showed as a white bar along its top
+            if ctypes.windll.user32.IsZoomed(msg.hWnd):
                 params = _NCCALCSIZE_PARAMS.from_address(msg.lParam)
                 t = _frame_thickness(msg.hWnd)
                 r = params.rgrc[0]
