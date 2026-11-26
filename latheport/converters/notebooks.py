@@ -99,4 +99,8 @@ def ipynb_to_html(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
             body += _outputs(cell, as_html=True)
         elif source:
             body.append(f"<pre>{html.escape(source)}</pre>")
-    dst.write_text(page(src.stem, "\n".join(body)), encoding="utf-8")
+    # a notebook can come from anyone: the HTML its outputs and Markdown cells carry may not run or reach out
+    # when the page is opened (scripts, handlers, frames, pictures from the web; email.clean_fragment). Each
+    # piece is cleaned on its own: a cleaned piece is whole, so pieces can't join into a tag
+    from .email import clean_fragment
+    dst.write_text(page(src.stem, "\n".join(clean_fragment(b) for b in body)), encoding="utf-8")

@@ -149,13 +149,12 @@ def _scheme_text(text: str) -> str:
     return re.sub(r"[\x00-\x20]", "", text)
 
 
-def _body_html(raw: str) -> tuple[str, str]:
-    """(styles, body) from a full HTML document: its own <style> kept, nothing in it that runs or reaches out
-    when the page is opened: scripts and their on...= handlers, frames, plugins, links to stylesheets, a
-    refresh, and pictures from the web (a sender's tracking pixel tells them the mail was opened). Links stay
-    as links: they go nowhere until clicked."""
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(raw, "html.parser")
+def clean_html(soup) -> None:
+    """Takes out of a parsed page (BeautifulSoup) everything that runs or reaches out when it's opened:
+    scripts and their on...= handlers, javascript: links, frames, plugins, links to stylesheets, a refresh,
+    and pictures and styles from the web (a sender's tracking pixel tells them the mail was opened). Its own
+    <style>, its pictures held as data: URIs and its text stay; links stay as links: they go nowhere until
+    clicked. Used for mail, saved web pages and notebooks, which may come from anyone."""
     for tag in soup(["script", "iframe", "frame", "frameset", "object", "embed", "applet", "link", "base", "form"]):
         tag.decompose()
     for tag in soup("meta"):
@@ -170,11 +169,58 @@ def _body_html(raw: str) -> tuple[str, str]:
                 del tag.attrs[name]
             elif low in ("src", "srcset", "background", "poster", "lowsrc", "dynsrc") and REMOTE.match(text):
                 del tag.attrs[name]  # the picture from the web isn't fetched (its alt text stays)
+            elif low in ("href", "xlink:href") and tag.name in ("image", "use", "feimage") and REMOTE.match(text):
+                del tag.attrs[name]  # nor a picture an SVG pulls in
             elif low == "style" and CSS_REMOTE.search(text):
                 tag.attrs[name] = CSS_REMOTE.sub("none", text)  # nor one a style asks for
     for tag in soup("style"):
         if tag.string and CSS_REMOTE.search(tag.string):
             tag.string = CSS_REMOTE.sub("", tag.string)
+
+
+# Tags and attributes that can't run anything or reach out, whatever their values: a fragment made only of these
+# (a pandas table, say) needs no parsing. Anything else (links, pictures, style, comments) goes through clean_html.
+PLAIN_TAGS = frozenset({
+    "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col", "div", "span", "p", "br",
+    "hr", "b", "i", "u", "s", "em", "strong", "small", "sub", "sup", "code", "pre", "kbd", "samp", "var",
+    "blockquote", "q", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "dl", "dt", "dd", "abbr", "cite",
+    "dfn", "mark"})
+PLAIN_ATTRS = frozenset({"class", "id", "border", "colspan", "rowspan", "align", "valign", "width", "height", "title",
+                         "lang", "dir", "scope"})
+_TAG = re.compile(r"""<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:[^>"']|"[^"]*"|'[^']*')*)>""")
+_ATTR = re.compile(r"""([^\s"'=<>/`]+)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>`]+))?""")
+
+
+def _plainly_safe(fragment: str) -> bool:
+    """Every < in the fragment opens a whole tag from PLAIN_TAGS with only PLAIN_ATTRS (quoted values read as
+    values, so a > inside quotes can't hide an attribute, and every name-like word in a tag counts as an
+    attribute, so one after a stray quote is still seen)."""
+    tags = 0
+    for m in _TAG.finditer(fragment):
+        tags += 1
+        if m.group(2).lower() not in PLAIN_TAGS:
+            return False
+        if any(a.group(1).lower() not in PLAIN_ATTRS for a in _ATTR.finditer(m.group(3))):
+            return False
+    return tags == fragment.count("<")
+
+
+def clean_fragment(fragment: str) -> str:
+    """A piece of HTML from a file that may come from anyone, with nothing in it that runs or reaches out
+    (clean_html); one made only of plain tags is returned as it is, unparsed."""
+    if _plainly_safe(fragment):
+        return fragment
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(fragment, "html.parser")
+    clean_html(soup)
+    return str(soup)
+
+
+def _body_html(raw: str) -> tuple[str, str]:
+    """(styles, body) from a full HTML document, cleaned (clean_html)."""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(raw, "html.parser")
+    clean_html(soup)
     styles = "".join(str(s) for s in soup("style"))
     body = soup.body or soup
     return styles, "".join(str(c) for c in body.contents)
@@ -266,4 +312,15 @@ def mht_to_html(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
     page_html = _swap_refs(page_html, uris)
     # written as UTF-8 now, whatever the page said before
     page_html = re.sub(r"""(<meta[^>]*charset=["']?)[\w-]+""", r"\1utf-8", page_html, flags=re.IGNORECASE)
-    dst.write_text(page_html, encoding="utf-8")
+    # a saved page can come from anywhere: nothing in it may run or reach out when it's opened (clean_html). Its
+    # own stylesheets, inlined above as data: links, become <style> first, so the page keeps its look
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(page_html, "html.parser")
+    for link in soup("link"):
+        href = str(link.get("href", ""))
+        if href.lower().startswith("data:text/css;base64,"):
+            style = soup.new_tag("style")
+            style.string = base64.b64decode(href.split(",", 1)[1]).decode("utf-8", "replace")
+            link.replace_with(style)
+    clean_html(soup)
+    dst.write_text(str(soup), encoding="utf-8")

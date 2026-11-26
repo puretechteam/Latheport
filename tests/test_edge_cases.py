@@ -297,10 +297,10 @@ def test_a_web_archive_swaps_whole_references_and_its_stylesheets_pictures(tmp_p
     out = pipeline.convert(src, "html", out_dir=tmp_path / "out").read_text(encoding="utf-8")
     assert 'href="http://x/a.png.bak"' in out  # was rewritten as a.png's data with ".bak" after it
     assert 'src="data:image/png;base64,' in out
-    import base64
     import re
-    css = base64.b64decode(re.search(r'href="data:text/css;base64,([^"]+)"', out).group(1)).decode()
+    css = re.search(r"<style>(.*?)</style>", out, re.DOTALL).group(1)  # the page's own stylesheet, now inline
     assert "url(data:image/png;base64," in css  # the stylesheet's picture came along too
+    assert 'href="data:text/css' not in out  # no longer a <link> (the cleaner drops those)
 
 
 # ---- plan and convert agree
