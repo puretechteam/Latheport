@@ -2,7 +2,7 @@
 
 Newest first. Each entry is dated by when it landed.
 
-## Unreleased
+## 2026-11-26: Latheport 1.5.2, safer pages from notebooks and saved web pages
 
 - **Safer pages from notebooks and saved web pages**: a Jupyter notebook or an .mht web archive turned into HTML (or PDF) now loses its scripts, event handlers, frames, plugins, refreshes and pictures or styles from the web, as mail already did, so opening the result runs nothing and contacts no server. Tables, text, the file's own pictures and its own styles stay. A 400-cell notebook converts in 0.20 s instead of 0.16 s; a saved page of 2,000 paragraphs in 0.21 s instead of 0.02 s.
 

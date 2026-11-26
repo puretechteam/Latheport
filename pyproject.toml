@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "latheport"
-version = "1.5.1"
+version = "1.5.2"
 description = "Convert, compress, edit or extract any file."
 readme = "README.md"
 license = "MIT"
@@ -14,7 +14,7 @@ requires-python = ">=3.11"
 dependencies = [
     "PySide6>=6.7",  # QRhiWidget, for the 3D viewer
     "Pillow>=11.3",
-    "pillow-heif>=0.18",
+    "pillow-heif>=0.18,<1.9",  # 1.9 opens big HEIC that other readers still cannot; the reopen check needs <1.9
     "py7zr>=0.22",
     "pypdfium2>=5.0",  # PDFium: reading and drawing PDFs (BSD / Apache)
     "PyYAML>=6",
