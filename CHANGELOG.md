@@ -2,6 +2,10 @@
 
 Newest first. Each entry is dated by when it landed.
 
+## Unreleased
+
+- **Fixed: map conversions.** GeoJSON areas no longer gain a duplicate corner on every conversion, GPX routes keep their description, and the CSV export fills in the description of tracks and routes.
+
 ## 2026-11-12: Latheport 1.5.1, faster 7z, Open with Latheport, fixes for the move from ConvertAll
 
 In numbers (the built 1.5.0 and 1.5.1 taking turns on the same PC): Latheport's own 78 MB download from zip to 7z in 11.2 s and 10.8 s instead of 60.2 s and 59.4 s, 5.4 times faster. Updating from 1.5.0 with *Update now*: the new window was up 10 s after the old one opened.
