@@ -2,6 +2,7 @@
 
 import io
 import re
+import shutil
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -107,6 +108,21 @@ def pdf_to_comic(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
 
 @converter(inputs={"folder"}, outputs=WRITABLE, terminal=True)
 def folder_to_comic(src: Path, dst: Path, src_fmt: str, dst_fmt: str) -> None:
-    if not _pages(src):
+    """The folder's pages (the ones folder_to_pdf takes, subfolders kept) and its ComicInfo.xml;
+    nothing else in it (Thumbs.db, .DS_Store, __MACOSX, text files) goes into the comic."""
+    pages = _pages(src)
+    if not pages:
         raise ConversionError("No images found in this folder")
-    compress(src, dst, dst_fmt)
+    info = [p for p in src.iterdir() if p.is_file() and p.name.lower() == "comicinfo.xml"][:1]
+    work = dst.parent / "_pages"
+    work.mkdir()
+    for path in pages + info:
+        cancel.check()
+        out = work / path.relative_to(src)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, out)
+    left = sum(p.is_file() for p in src.rglob("*")) - len(pages) - len(info)
+    if left:
+        note(f"{left} file that isn't a page was left out" if left == 1
+             else f"{left} files that aren't pages were left out")
+    compress(work, dst, dst_fmt)
