@@ -100,6 +100,18 @@ def read_gpx(data: bytes) -> Map:
     return m
 
 
+def _closed(seg: list[Point]) -> bool:
+    """Whether a ring already ends on its first corner. Coordinates only: the two ends of a ring can differ
+    in name or time and still be the same corner."""
+    first, last = seg[0], seg[-1]
+    return (first.lat, first.lon, first.ele) == (last.lat, last.lon, last.ele)
+
+
+def _ring(seg: list[Point]) -> list[Point]:
+    """A ring closed with exactly one closing position."""
+    return seg if _closed(seg) else seg + seg[:1]
+
+
 def write_gpx(m: Map) -> bytes:
     ns = "http://www.topografix.com/GPX/1/1"
     root = ET.Element("gpx", {"version": "1.1", "creator": "Latheport", "xmlns": ns})
@@ -124,6 +136,8 @@ def write_gpx(m: Map) -> bytes:
             rte = ET.SubElement(root, "rte")
             if line.name:
                 ET.SubElement(rte, "name").text = line.name
+            if line.desc:  # GPX 1.1 puts name, cmt, desc in that order
+                ET.SubElement(rte, "desc").text = line.desc
             for p in (p for seg in line.segments for p in seg):
                 point(rte, "rtept", p)
         else:  # tracks, and outlines drawn as a track
@@ -234,7 +248,7 @@ def write_kml(m: Map) -> bytes:
         for seg in segs:
             if line.kind == "area":
                 ring = ET.SubElement(ET.SubElement(ET.SubElement(parent, "Polygon"), "outerBoundaryIs"), "LinearRing")
-                ET.SubElement(ring, "coordinates").text = coords(seg + seg[:1] if seg[0] != seg[-1] else seg)
+                ET.SubElement(ring, "coordinates").text = coords(_ring(seg))
             else:
                 ET.SubElement(ET.SubElement(parent, "LineString"), "coordinates").text = coords(seg)
     ET.indent(root)
@@ -327,8 +341,8 @@ def write_geojson(m: Map) -> bytes:
         props["kind"] = line.kind
         if line.kind == "area":
             geom = {"type": "MultiPolygon" if len(segs) > 1 else "Polygon",
-                    "coordinates": [[[pos(p) for p in s + s[:1]]] for s in segs] if len(segs) > 1
-                    else [[pos(p) for p in segs[0] + segs[0][:1]]]}
+                    "coordinates": [[[pos(p) for p in _ring(s)]] for s in segs] if len(segs) > 1
+                    else [[pos(p) for p in _ring(segs[0])]]}
         elif len(segs) == 1:
             geom = {"type": "LineString", "coordinates": [pos(p) for p in segs[0]]}
             if any(p.time for p in segs[0]):
@@ -353,7 +367,8 @@ def write_csv(m: Map) -> bytes:
     for line in m.lines:
         for i, seg in enumerate(line.segments, 1):
             for p in seg:
-                w.writerow([line.kind, line.name, i, p.lat, p.lon, "" if p.ele is None else p.ele, p.time, ""])
+                w.writerow([line.kind, line.name, i, p.lat, p.lon, "" if p.ele is None else p.ele, p.time,
+                            line.desc])
     return out.getvalue().encode("utf-8")
 
 
