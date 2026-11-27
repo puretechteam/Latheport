@@ -335,7 +335,7 @@ def read_events(text: str) -> list[dict]:
 
 _DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%d.%m.%Y", "%Y/%m/%d", "%d %b %Y", "%b %d, %Y")
 _DAY_FIRST_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d", "%d %b %Y", "%b %d, %Y")
-_DAY_FIRST_HINT = re.compile(r"(?<![\d/-])(\d{1,2})[/-](\d{1,2})(?!\d)")  # numeric d/m or m/d dates (not ISO)
+_DAY_FIRST_HINT = re.compile(r"^\s*(\d{1,2})[/-](\d{1,2})[/-]\d{4}(?!\d)")  # whole numeric d/m/yyyy or m/d/yyyy at the start of the cell, not ISO
 _TIME_FORMATS = ("%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M:%S %p", "%I:%M%p")
 
 

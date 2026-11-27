@@ -98,6 +98,38 @@ def test_invalid_date_does_not_decide_day_first_order():
     assert any("1" in n and "left out" in n for n in found), found
 
 
+def test_iso_week_date_does_not_decide_order():
+    # A week date like 2026-W13-1 contains "13-1"; that must not be read as
+    # day-first evidence, so 10/05/2026 keeps its month-first default (5 Oct),
+    # not 10 May, and the note quotes 10/05/2026 rather than the week date.
+    ics, found = _ics([
+        {"Start Date": "2026-W13-1", "Subject": "week"},
+        {"Start Date": "10/05/2026", "Subject": "one"},
+    ])
+    starts = _starts(ics)
+    assert "20261005" in starts and "20260510" not in starts, starts
+    assert any("10/05/2026" in n and "month" in n for n in found), found
+    # A week date must not create a false "Mixed date order" error either.
+    ics2, found2 = _ics([
+        {"Start Date": "2026-W13-1", "Subject": "week"},
+        {"Start Date": "10/25/2026", "Subject": "one"},
+    ])
+    assert "20261025" in _starts(ics2), _starts(ics2)
+    assert not any("Mixed" in n for n in found2), found2
+
+
+def test_iso_datetime_offset_does_not_get_quoted():
+    # The -05:00 offset in a full ISO timestamp contains "00-05"; that must
+    # not be picked as the example cell for the month-first note.
+    ics, found = _ics([
+        {"Start Date": "2026-10-05T09:00:00-05:00", "Subject": "offset"},
+        {"Start Date": "10/05/2026", "Subject": "one"},
+    ])
+    assert "20261005" in _starts(ics), _starts(ics)
+    assert any("10/05/2026" in n and "month" in n for n in found), found
+    assert not any("2026-10-05T09" in n for n in found), found
+
+
 def test_end_date_contributes_to_order_detection():
     # Start is ambiguous (05/10) but end 25/10 proves day-first; both must
     # be read. Also: conflicting start/end orders must be rejected.
