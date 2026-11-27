@@ -68,3 +68,28 @@ def test_mixed_day_and_month_first_is_an_error():
             {"Start Date": "10/25/2026", "Subject": "month first"},
         ])
     assert "25/10/2026" in str(exc.value) and "10/25/2026" in str(exc.value)
+
+
+def test_invalid_date_does_not_decide_day_first_order():
+    # A malformed second date (99/99/2026) must not turn an otherwise
+    # month-first table into a day-first one; that row is just skipped.
+    ics, found = _ics([
+        {"Start Date": "10/25/2026", "Subject": "good"},
+        {"Start Date": "99/99/2026", "Subject": "bad"},
+    ])
+    assert _starts(ics) == ["20261025"]
+    assert any("1" in n and "left out" in n for n in found), found
+
+
+def test_end_date_contributes_to_order_detection():
+    # Start is ambiguous (05/10) but end 25/10 proves day-first; both must
+    # be read. Also: conflicting start/end orders must be rejected.
+    ics, found = _ics([
+        {"Start Date": "05/10/2026", "End Date": "25/10/2026", "Subject": "day first"},
+    ])
+    assert _starts(ics) == ["20261005"]
+    assert not any("month" in n for n in found), found
+    with pytest.raises(ConversionError):
+        _ics([
+            {"Start Date": "25/10/2026", "End Date": "10/25/2026", "Subject": "mixed"},
+        ])

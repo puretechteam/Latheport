@@ -342,9 +342,10 @@ _TIME_FORMATS = ("%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M:%S %p", "%I:%M%p")
 def _day_order(values: list[str]) -> tuple[bool, str | None, tuple[str, str] | None]:
     """Decide day-first from every numeric date cell in a table.
 
-    A first number over 12 means day first; a second over 12 means month first. Returns
-    (day_first, month_cell, ambiguous) -- the cells to quote when reporting a month-first
-    default or a table that holds both orders.
+    A first number over 12 (and a valid month second) means day first; a second over 12
+    (with a valid month first) means month first. A malformed pair such as 99/99/2026
+    cannot decide the table. Returns (day_first, month_cell, ambiguous) -- the cells to
+    quote when reporting a month-first default or a table that holds both orders.
     """
     day, month, day_cell, month_cell, ambiguous = False, False, None, None, None
     for value in values:
@@ -352,11 +353,11 @@ def _day_order(values: list[str]) -> tuple[bool, str | None, tuple[str, str] | N
         if not m:
             continue
         a, b = int(m[1]), int(m[2])
-        if a > 12:
+        if 12 < a <= 31 and 1 <= b <= 12:
             day, day_cell = True, str(value)
             if month and ambiguous is None:
                 ambiguous = (str(value), month_cell)
-        elif b > 12:
+        elif 12 < b <= 31 and 1 <= a <= 12:
             month, month_cell = True, str(value)
             if day and ambiguous is None:
                 ambiguous = (day_cell, str(value))
@@ -415,8 +416,10 @@ def write_events(records: list[dict]) -> str:
         cell = {_norm(k): str(v) for k, v in rec.items()}
         return next((cell[n] for n in names if cell.get(n)), "")
 
-    date_cells = [when_cell(rec, "start", "start date", "begin", "date", "dtstart",
-                            "end", "end date", "dtend") for rec in records]
+    date_cells = [cell for rec in records for cell in (
+        when_cell(rec, "start", "start date", "begin", "date", "dtstart"),
+        when_cell(rec, "end", "end date", "dtend"),
+    )]
     day_first, month_cell, ambiguous = _day_order(date_cells)
     if ambiguous:
         raise ConversionError(
