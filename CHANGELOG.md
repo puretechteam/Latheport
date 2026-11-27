@@ -4,7 +4,7 @@ Newest first. Each entry is dated by when it landed.
 
 ## Unreleased
 
-- **Fixed: calendar tables with day-first dates** (`05/10/2026` as 5 October) were read as month-first or silently left out. The date order is now decided from the whole table, mixed tables are rejected, and rows without a readable date are counted in a note.
+- **Fixed: calendar tables with day-first dates** (`05/10/2026` as 5 October) were read as month-first or silently left out. The date order is now decided from the whole table, mixed tables are rejected, and rows without a readable date are counted in a note. Contributed by [@bfs2021](https://github.com/bfs2021) in [#14](https://github.com/puretechteam/Latheport/pull/14).
 - **Fixed: turning a folder into a comic (CBZ, CBR, CB7, CBT) packed every file in it**, Thumbs.db, desktop.ini, .DS_Store, __MACOSX and text files included. Only the pages (the pictures a folder turned into a PDF uses, in their subfolders) and ComicInfo.xml go in now, and the conversion says how many files were left out. Contributed by [@Aadithya-kl](https://github.com/Aadithya-kl) in [#12](https://github.com/puretechteam/Latheport/pull/12).
 
 ## 2026-11-26: Latheport 1.5.2, safer pages from notebooks and saved web pages
