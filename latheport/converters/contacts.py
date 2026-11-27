@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 
 from ..errors import ConversionError
-from ..registry import converter
+from ..registry import converter, note
 from ..textfile import read_text
 
 # ---- content lines
@@ -333,12 +333,39 @@ def read_events(text: str) -> list[dict]:
     return events
 
 
-_DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%d.%m.%Y", "%Y/%m/%d", "%d %b %Y", "%b %d, %Y")
+_DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%d.%m.%Y", "%Y/%m/%d", "%d %b %Y", "%b %d, %Y")
+_DAY_FIRST_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d", "%d %b %Y", "%b %d, %Y")
+_DAY_FIRST_HINT = re.compile(r"^\s*(\d{1,2})[/-](\d{1,2})[/-]\d{4}(?!\d)")  # whole numeric d/m/yyyy or m/d/yyyy at the start of the cell, not ISO
 _TIME_FORMATS = ("%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M:%S %p", "%I:%M%p")
 
 
-def _parse_when(date: str, time: str = "") -> tuple[dt.datetime | dt.date | None, bool]:
-    """(value, is_utc) from a table's date (+ time) cells."""
+def _day_order(values: list[str]) -> tuple[bool, str | None, tuple[str, str] | None]:
+    """Decide day-first from every numeric date cell in a table.
+
+    A first number over 12 (and a valid month second) means day first; a second over 12
+    (with a valid month first) means month first. A malformed pair such as 99/99/2026
+    cannot decide the table. Returns (day_first, month_cell, ambiguous) -- the cells to
+    quote when reporting a month-first default or a table that holds both orders.
+    """
+    day, month, day_cell, month_cell, ambiguous = False, False, None, None, None
+    for value in values:
+        m = _DAY_FIRST_HINT.search(str(value))
+        if not m:
+            continue
+        a, b = int(m[1]), int(m[2])
+        if 12 < a <= 31 and 1 <= b <= 12:
+            day, day_cell = True, str(value)
+            if month and ambiguous is None:
+                ambiguous = (str(value), month_cell)
+        elif 12 < b <= 31 and 1 <= a <= 12:
+            month, month_cell = True, str(value)
+            if day and ambiguous is None:
+                ambiguous = (day_cell, str(value))
+    return day, month_cell, ambiguous
+
+
+def _parse_when(date: str, time: str = "", formats: tuple[str, ...] = _DATE_FORMATS) -> tuple[dt.datetime | dt.date | None, bool]:
+    """(value, is_utc) from a table's date (+ time) cells, using the table's date order."""
     date, time = str(date).strip(), str(time).strip()
     if not date:
         return None, False
@@ -352,7 +379,7 @@ def _parse_when(date: str, time: str = "") -> tuple[dt.datetime | dt.date | None
             return t.date(), False
         day = t
     except ValueError:
-        day = next((dt.datetime.strptime(date, f) for f in _DATE_FORMATS if _try(date, f)), None)  # noqa: DTZ007 - floating time
+        day = next((dt.datetime.strptime(date, f) for f in formats if _try(date, f)), None)  # noqa: DTZ007 - floating time
         if day is None:
             return None, False
         if not time:
@@ -384,15 +411,35 @@ def write_events(records: list[dict]) -> str:
     now = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Pure Tech//Latheport//EN", "CALSCALE:GREGORIAN"]
     count = 0
+
+    def when_cell(rec: dict, *names: str) -> str:
+        cell = {_norm(k): str(v) for k, v in rec.items()}
+        return next((cell[n] for n in names if cell.get(n)), "")
+
+    date_cells = [cell for rec in records for cell in (
+        when_cell(rec, "start", "start date", "begin", "date", "dtstart"),
+        when_cell(rec, "end", "end date", "dtend"),
+    )]
+    day_first, month_cell, ambiguous = _day_order(date_cells)
+    if ambiguous:
+        raise ConversionError(
+            f"Mixed date order in the table: {ambiguous[0]!r} and {ambiguous[1]!r} disagree")
+    formats = _DAY_FIRST_FORMATS if day_first else _DATE_FORMATS
+    if not day_first and not month_cell:
+        example = next((c for c in date_cells if _DAY_FIRST_HINT.search(c)), None)
+        if example:
+            note(f"Dates like {example} were read as month/day")
+    skipped = 0
     for rec in records:
         cell = {_norm(k): str(v) for k, v in rec.items()}
 
         def pick(*names: str, cell: dict = cell) -> str:
             return next((cell[n] for n in names if cell.get(n)), "")
-        start, utc = _parse_when(pick("start", "start date", "begin", "date", "dtstart"), pick("start time"))
+        start, utc = _parse_when(pick("start", "start date", "begin", "date", "dtstart"), pick("start time"), formats)
         if start is None:
+            skipped += 1
             continue
-        end, end_utc = _parse_when(pick("end", "end date", "dtend"), pick("end time"))
+        end, end_utc = _parse_when(pick("end", "end date", "dtend"), pick("end time"), formats)
         all_day = pick("all day", "all day event").lower() in ("yes", "true", "1", "y", "x")
         if all_day or not isinstance(start, dt.datetime):
             start = start.date() if isinstance(start, dt.datetime) else start
@@ -419,6 +466,9 @@ def write_events(records: list[dict]) -> str:
         count += 1
     if not count:
         raise ConversionError("No events found: the table needs a Start (or Start Date) column")
+    if skipped:
+        note(f"{skipped} row had no date Latheport could read and was left out" if skipped == 1
+             else f"{skipped} rows had no date Latheport could read and were left out")
     lines.append("END:VCALENDAR")
     return "\r\n".join(_fold(line) for line in lines) + "\r\n"
 
