@@ -333,7 +333,7 @@ def read_events(text: str) -> list[dict]:
     return events
 
 
-_DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%d.%m.%Y", "%Y/%m/%d", "%d %b %Y", "%b %d, %Y")
+_DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%d.%m.%Y", "%Y/%m/%d", "%d %b %Y", "%b %d, %Y")
 _DAY_FIRST_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d", "%d %b %Y", "%b %d, %Y")
 _DAY_FIRST_HINT = re.compile(r"(?<![\d/-])(\d{1,2})[/-](\d{1,2})(?!\d)")  # numeric d/m or m/d dates (not ISO)
 _TIME_FORMATS = ("%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M:%S %p", "%I:%M%p")
@@ -467,7 +467,8 @@ def write_events(records: list[dict]) -> str:
     if not count:
         raise ConversionError("No events found: the table needs a Start (or Start Date) column")
     if skipped:
-        note(f"{skipped} rows had no date Latheport could read and were left out")
+        note(f"{skipped} row had no date Latheport could read and was left out" if skipped == 1
+             else f"{skipped} rows had no date Latheport could read and were left out")
     lines.append("END:VCALENDAR")
     return "\r\n".join(_fold(line) for line in lines) + "\r\n"
 

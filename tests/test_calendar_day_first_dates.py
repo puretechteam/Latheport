@@ -70,6 +70,23 @@ def test_mixed_day_and_month_first_is_an_error():
     assert "25/10/2026" in str(exc.value) and "10/25/2026" in str(exc.value)
 
 
+def test_single_skipped_row_uses_singular_wording():
+    ics, found = _ics([
+        {"Start Date": "2026-10-05", "Subject": "good"},
+        {"Start Date": "not a date", "Subject": "bad"},
+    ])
+    assert _starts(ics) == ["20261005"]
+    assert any("1 row had no date" in n and "was left out" in n for n in found), found
+
+
+def test_dashed_month_first_date_is_read():
+    # Dashes must work both ways: an undecided table with 10-25-2026 means
+    # 25 October (month-first), and must not claim the row was left out.
+    ics, found = _ics([{"Start Date": "10-25-2026", "Subject": "one"}])
+    assert _starts(ics) == ["20261025"]
+    assert found == []
+
+
 def test_invalid_date_does_not_decide_day_first_order():
     # A malformed second date (99/99/2026) must not turn an otherwise
     # month-first table into a day-first one; that row is just skipped.
